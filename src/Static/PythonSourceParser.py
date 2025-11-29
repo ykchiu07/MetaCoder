@@ -9,11 +9,10 @@ class PythonSourceParser:
     分析 Python 原始碼並將其轉換為 ASTGraph 流程圖結構。
     """
     def __init__(self, graph_instance):
-        """
-        Args:
-            graph_instance (ASTGraph): 初始化的 ASTGraph 實例
-        """
         self.graph = graph_instance
+        # 新增狀態堆疊，用於記錄當前處於哪個 Class 或 Function 內
+        self.current_class = None
+        self.current_method = None
     def _connect_with_context(self, src, target):
         """智能連接：若來源是條件或迴圈節點且尚未有 True 路徑，則自動標記為 No"""
         label = None
@@ -227,35 +226,72 @@ class PythonSourceParser:
             return [node_id]
 
         elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # 1. 建立函式定義節點 (只顯示簽名，不顯示整個內容)
             args = [a.arg for a in stmt.args.args]
             sig = f"def {stmt.name}({', '.join(args)}):"
-            func_id = self.graph.add_node(sig, node_type="function")
 
-            # 2. 連接主流程 (定義函式是主程式執行的一步)
+            # 儲存 metadata: scope (所屬類別)
+            func_id = self.graph.add_node(
+                sig,
+                node_type="function",
+                lineno=stmt.lineno,
+                parent_class=self.current_class  # LCOM4 支援：記錄此方法屬於哪個類別
+            )
+
             for src in incoming_ids:
                 self._connect_with_context(src, func_id)
 
-            # 3. 遞迴處理函式內部 (Body)
-            # 這裡傳入 [func_id] 作為開頭，讓函式內部的第一行連線到函式定義
-            # 注意：上一回合加入的 "Docstring 過濾邏輯" 會在這裡遞迴時自動生效，
-            # 因此函式內的第一行多行註解會被自動略過。
+            # --- 更新 Context ---
+            prev_method = self.current_method
+            self.current_method = stmt.name
+
             self._process_block(stmt.body, [func_id])
 
-            # 4. 回傳 func_id
-            # 主程式的流向是：定義完函式 -> 繼續執行下一行腳本
-            # 函式內部的邏輯是獨立的子圖，不會直接流向主程式的下一行
+            self.current_method = prev_method
+            # ---------------------
+
             return [func_id]
 
         elif isinstance(stmt, ast.ClassDef):
-            # 1. 建立類別定義節點
-            class_id = self.graph.add_node(f"class {stmt.name}:", node_type="class")
+            # --- 抽象度分析邏輯 ---
+            is_abstract = False
+            # 1. 檢查繼承 (Bases): 是否繼承 'ABC'
+            for base in stmt.bases:
+                if isinstance(base, ast.Name) and base.id == 'ABC':
+                    is_abstract = True
+                    break
+                # (進階可檢查 attribute access 如 abc.ABC)
+
+            # 2. 檢查方法裝飾器 (Decorators): 是否有 @abstractmethod
+            if not is_abstract:
+                for node in ast.walk(stmt):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        for decorator in node.decorator_list:
+                            # 檢查 @abstractmethod 或 @abc.abstractmethod
+                            if (isinstance(decorator, ast.Name) and decorator.id == 'abstractmethod') or \
+                               (isinstance(decorator, ast.Attribute) and decorator.attr == 'abstractmethod'):
+                                is_abstract = True
+                                break
+                    if is_abstract: break
+
+            # 儲存 metadata: is_abstract, lineno
+            class_id = self.graph.add_node(
+                f"class {stmt.name}:",
+                node_type="class",
+                lineno=stmt.lineno,      # LOC 支援
+                is_abstract=is_abstract  # 抽象度支援
+            )
 
             for src in incoming_ids:
                 self._connect_with_context(src, class_id)
 
-            # 2. 遞迴處理類別內部 (包含方法定義)
+            # --- 更新 Context ---
+            prev_class = self.current_class
+            self.current_class = stmt.name # 設定當前類別
+
             self._process_block(stmt.body, [class_id])
+
+            self.current_class = prev_class # 還原 Context
+            # ---------------------
 
             return [class_id]
 
@@ -269,7 +305,17 @@ class PythonSourceParser:
                 # 就像這個註解節點不存在一樣。
                 return incoming_ids
             # ---------------------------------------
-
+# --- LCOM4 關鍵：提取使用的實例屬性 (Field Access) ---
+            used_fields = set()
+            # 如果我們在一個類別的方法內
+            if self.current_class and self.current_method:
+                for node in ast.walk(stmt):
+                    # 尋找 self.xxx 的模式
+                    if isinstance(node, ast.Attribute):
+                        # 檢查是否為 self.屬性
+                        if isinstance(node.value, ast.Name) and node.value.id == 'self':
+                            used_fields.add(node.attr)
+            # --------------------------------------------------
             content = ast.unparse(stmt)
 
             # 簡單判斷是否為 I/O (Print 或 Input)
@@ -288,9 +334,16 @@ class PythonSourceParser:
                      if stmt.value.args and isinstance(stmt.value.args[0], ast.Call) and getattr(stmt.value.args[0].func, 'id', '') == 'input':
                         is_io = True
 
-            n_type = "io" if is_io else "process"
+            n_type = "io" if is_io else "process" # 假設 is_io 已計算
 
-            node_id = self.graph.add_node(content, node_type=n_type)
+            node_id = self.graph.add_node(
+                content,
+                node_type=n_type,
+                lineno=stmt.lineno,             # LOC 支援
+                parent_class=self.current_class, # LCOM4 支援 (方便追蹤)
+                parent_method=self.current_method,
+                accessed_fields=list(used_fields) # LCOM4 支援：記錄此節點用到的屬性
+            )
 
             for src in incoming_ids:
                 self._connect_with_context(src, node_id)
