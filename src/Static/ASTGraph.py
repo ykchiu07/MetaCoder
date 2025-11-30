@@ -14,12 +14,13 @@ class ASTGraph:
         # 記錄起始節點 ID (可選)
         self.root_id = None
 
-    # 修改 add_node 方法簽名，加入 **kwargs 以接收任意元數據
+# 修改原本的 add_node，增加 **kwargs
     def add_node(self, content: str, node_type: str = "process", node_id: str = None, **kwargs) -> str:
         if node_id is None:
             node_id = str(uuid.uuid4())[:8]
 
-        # 將 kwargs 中的所有屬性存入節點 (例如 lineno, scope, is_abstract)
+        # [修改點] 確保將 kwargs 傳遞給 NetworkX 的 add_node
+        # 原本可能是: self.graph.add_node(node_id, label=content, type=node_type)
         self.graph.add_node(node_id, label=content, type=node_type, **kwargs)
 
         if self.root_id is None:

@@ -84,64 +84,71 @@ class StructureAnalyzer:
         return round(100.0 * math.exp(-0.2 * ce), 2)
 
     # --- 2. 內聚性 (LCOM4) [模組內] ---
+    # 修改 calculateCohesion
     def calculateCohesion(self, module_name: str) -> dict:
         """
-        計算 LCOM4 (Lack of Cohesion of Methods version 4)。
-        回傳: { 'ClassName': lcom4_score }
-        LCOM4 = 1 (好), >1 (差，建議拆分)
+        計算 LCOM4 與 連接密度 (Density)。
+        Returns: { 'ClassName': {'lcom4': int, 'density': float} }
         """
         graph = self.graphs.get(module_name)
         if not graph: return {}
 
         results = {}
-        # 篩選出所有類別節點
         class_nodes = [d for _, d in graph.graph.nodes(data=True) if d.get('type') == 'class']
 
         for cls in class_nodes:
             cls_name = cls.get('name')
 
-            # A. 找出該類別的所有方法
+            # 1. 建立方法關聯圖
             methods = []
-            method_usage = defaultdict(set) # {method_name: {fields...}}
+            method_usage = defaultdict(set)
 
             for _, d in graph.graph.nodes(data=True):
-                # 找出屬於此類別的方法節點
+                # 找出方法
                 if d.get('type') == 'function' and d.get('parent_class') == cls_name:
                     methods.append(d.get('name'))
-
-                # 找出屬於此類別的方法內部的「屬性存取」
-                # (這依賴 PythonSourceAnalyzer 已經將 accessed_fields 寫入節點)
+                # 找出屬性使用
                 if d.get('parent_class') == cls_name and d.get('parent_method'):
                     fields = d.get('accessed_fields', [])
                     for f in fields:
                         method_usage[d.get('parent_method')].add(f)
 
-            if not methods:
-                results[cls_name] = 1 # 無方法類別視為內聚 (或忽略)
+            # 無方法或單一方法，視為完美內聚
+            if len(methods) <= 1:
+                results[cls_name] = {'lcom4': 1, 'density': 1.0}
                 continue
 
-            # B. 建立方法關聯圖 (Method Graph)
             m_graph = nx.Graph()
-            m_graph.add_nodes_from(methods) # 確保孤立方法也被計入
+            m_graph.add_nodes_from(methods)
 
+            actual_edges = 0
             for i in range(len(methods)):
                 for j in range(i + 1, len(methods)):
                     m1, m2 = methods[i], methods[j]
-                    # 如果兩個方法使用了至少一個共同屬性，則連線
                     if not method_usage[m1].isdisjoint(method_usage[m2]):
                         m_graph.add_edge(m1, m2)
+                        actual_edges += 1
 
-            # C. 計算連通分量數量
+            # 2. 計算 LCOM4 (連通分量數)
             lcom4 = nx.number_connected_components(m_graph)
-            results[cls_name] = lcom4
+
+            # 3. [新增] 計算連接密度 (Density)
+            # Max Edges = n * (n-1) / 2
+            n = len(methods)
+            max_edges = (n * (n - 1)) / 2
+            density = 0.0
+            if max_edges > 0:
+                density = round(actual_edges / max_edges, 2)
+
+            results[cls_name] = {'lcom4': lcom4, 'density': density}
 
         return results
 
     # --- 3. 程式碼行數 (LOC) [函式內] ---
+    # 修改 calculateLOC
     def calculateLOC(self, module_name: str) -> dict:
         """
-        計算函式長度。
-        回傳: { 'func_name': lines_of_code }
+        回傳過濾後的真實行數 (Real LOC)。
         """
         graph = self.graphs.get(module_name)
         if not graph: return {}
@@ -149,12 +156,15 @@ class StructureAnalyzer:
         results = {}
         for _, d in graph.graph.nodes(data=True):
             if d.get('type') == 'function':
-                # 利用 AST 節點的 lineno 資訊
-                start = d.get('lineno', 0)
-                end = d.get('end_lineno', start)
-                loc = end - start + 1
-                # 排除單行定義的極端情況
-                if loc < 0: loc = 0
+                # [修改] 優先使用 real_loc，若無則回退到舊算法
+                if 'real_loc' in d:
+                    loc = d['real_loc']
+                else:
+                    # Fallback
+                    start = d.get('lineno', 0)
+                    end = d.get('end_lineno', start)
+                    loc = end - start + 1
+
                 results[d.get('name')] = loc
         return results
 
@@ -206,147 +216,3 @@ class StructureAnalyzer:
             return 0.0
 
         return round(abstract_classes / total_classes, 2)
-
-
-import tempfile
-import shutil
-import textwrap
-
-# 假設上面已經定義了:
-# 1. ASTGraph
-# 2. PythonSourceAnalyzer
-# 3. StructureAnalyzer
-
-def run_demo():
-    print("=== StructureAnalyzer 整合測試範例 ===\n")
-
-    # 1. 建立暫存的測試專案環境
-    test_dir = tempfile.mkdtemp(prefix="ast_demo_project_")
-    print(f"[*] 建立測試專案目錄: {test_dir}")
-
-    try:
-        # --- 檔案 A: abstract_def.py (高抽象度，零依賴) ---
-        # 包含一個抽象類別，沒有實作，沒有 import 其他內部模組
-        code_a = textwrap.dedent("""
-            from abc import ABC, abstractmethod
-
-            class DataInterface(ABC):
-                @abstractmethod
-                def load(self):
-                    pass
-
-                @abstractmethod
-                def save(self, data):
-                    pass
-        """)
-        with open(os.path.join(test_dir, "abstract_def.py"), "w", encoding="utf-8") as f:
-            f.write(code_a)
-
-        # --- 檔案 B: utils.py (混合內聚性) ---
-        # 包含兩個類別：
-        # GoodCohesion: 方法間共享屬性 (LCOM4=1)
-        # BadCohesion: 方法各做各的，屬性不共享 (LCOM4=2)
-        code_b = textwrap.dedent("""
-            class GoodCohesion:
-                def __init__(self):
-                    self.shared_data = []
-
-                def add(self, item):
-                    self.shared_data.append(item)
-
-                def show(self):
-                    print(self.shared_data)
-
-            class BadCohesion:
-                def __init__(self):
-                    self.x = 0
-                    self.y = 0
-
-                def handle_x(self):
-                    print(self.x)
-
-                def handle_y(self):
-                    print(self.y)
-        """)
-        with open(os.path.join(test_dir, "utils.py"), "w", encoding="utf-8") as f:
-            f.write(code_b)
-
-        # --- 檔案 C: main_controller.py (高耦合，高不穩定性) ---
-        # Import 了上述兩個模組，屬於具體實作 (低抽象)
-        code_c = textwrap.dedent("""
-            import abstract_def
-            import utils
-
-            def main_logic():
-                # 這裡使用了 utils
-                helper = utils.GoodCohesion()
-                helper.add("test")
-                helper.show()
-
-                # 這裡使用了 abstract_def
-                print("Logic running...")
-
-            def another_long_function():
-                a = 1
-                b = 2
-                c = a + b
-                print(c)
-                # 佔位符，增加 LOC
-                return c
-        """)
-        with open(os.path.join(test_dir, "main_controller.py"), "w", encoding="utf-8") as f:
-            f.write(code_c)
-
-        # 2. 初始化分析器
-        print("[*] 開始分析原始碼...\n")
-        analyzer = StructureAnalyzer(test_dir)
-
-        # 3. 輸出報表
-        headers = [
-            "Module",
-            "Coupling(Score)",
-            "Instability(I)",
-            "Abstract(A)",
-            "LCOM4 (By Class)",
-            "LOC (By Func)"
-        ]
-        # 格式化字串
-        row_format = "{:<20} | {:<15} | {:<14} | {:<11} | {:<25} | {:<20}"
-
-        print(row_format.format(*headers))
-        print("-" * 115)
-
-        for mod_name in sorted(analyzer.graphs.keys()):
-            # 取得各項指標
-            coup_score = analyzer.calculateCoupling(mod_name)
-            instability = analyzer.calculateInstability(mod_name)
-            abstractness = analyzer.calculateAbstractness(mod_name)
-            lcom_dict = analyzer.calculateCohesion(mod_name)
-            loc_dict = analyzer.calculateLOC(mod_name)
-
-            # 簡化顯示用字串
-            lcom_str = str(lcom_dict).replace("'", "") if lcom_dict else "-"
-            loc_str = str(loc_dict).replace("'", "") if loc_dict else "-"
-
-            print(row_format.format(
-                mod_name,
-                f"{coup_score:.1f}",
-                f"{instability:.2f}",
-                f"{abstractness:.2f}",
-                lcom_str[:25] + "..." if len(lcom_str)>25 else lcom_str,
-                loc_str[:20] + "..." if len(loc_str)>20 else loc_str
-            ))
-
-        print("-" * 115)
-        print("\n=== 結果解讀 ===")
-        print("1. [abstract_def]:   Abstract=1.00 (純介面), Instability=0.00 (非常穩定, 無依賴).")
-        print("2. [utils]:          LCOM4 顯示 BadCohesion 為 2 (表示應拆分), GoodCohesion 為 1 (良好).")
-        print("3. [main_controller]:Coupling 分數較低 (因依賴了2個模組), Instability=1.00 (非常不穩定, 依賴他人).")
-
-    finally:
-        # 4. 清理環境
-        shutil.rmtree(test_dir)
-        print(f"\n[*] 已移除測試目錄: {test_dir}")
-
-if __name__ == "__main__":
-    run_demo()

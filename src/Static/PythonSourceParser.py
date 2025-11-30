@@ -13,6 +13,7 @@ class PythonSourceParser:
         # 新增狀態堆疊，用於記錄當前處於哪個 Class 或 Function 內
         self.current_class = None
         self.current_method = None
+        self.source_lines = []  # [新增] 用於儲存原始碼行
     def _connect_with_context(self, src, target):
         """智能連接：若來源是條件或迴圈節點且尚未有 True 路徑，則自動標記為 No"""
         label = None
@@ -38,6 +39,7 @@ class PythonSourceParser:
         """
         # 1. 使用 Python 內建 AST 解析原始碼
         try:
+            self.source_lines = source_code.splitlines()
             tree = ast.parse(source_code)
         except SyntaxError as e:
             print(f"Syntax Error in source code: {e}")
@@ -74,6 +76,21 @@ class PythonSourceParser:
             current_incoming = self._process_statement(stmt, current_incoming)
 
         return current_incoming
+
+    # [新增] 輔助函式：計算真實行數
+    def _count_real_loc(self, start_line, end_line):
+        if start_line is None or end_line is None:
+            return 0
+
+        # Python 行號從 1 開始，List 索引從 0 開始
+        lines = self.source_lines[start_line-1 : end_line]
+        real_count = 0
+        for line in lines:
+            stripped = line.strip()
+            # 過濾空行與單行註解
+            if stripped and not stripped.startswith('#'):
+                real_count += 1
+        return real_count
 
     def _process_statement(self, stmt: ast.stmt, incoming_ids: List[str]) -> List[str]:
         """
@@ -226,28 +243,31 @@ class PythonSourceParser:
             return [node_id]
 
         elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = [a.arg for a in stmt.args.args]
-            sig = f"def {stmt.name}({', '.join(args)}):"
+            # [新增] 取得結束行號 (Python 3.8+)
+            end_lineno = getattr(stmt, 'end_lineno', stmt.lineno)
 
-            # 儲存 metadata: scope (所屬類別)
+            # [關鍵修改] 呼叫計算函式
+            real_loc = self._count_real_loc(stmt.lineno, end_lineno)
+
+            # [關鍵修改] add_node 時傳入詳細資訊
             func_id = self.graph.add_node(
-                sig,
+                f"def {stmt.name}",
                 node_type="function",
-                lineno=stmt.lineno,
-                parent_class=self.current_class  # LCOM4 支援：記錄此方法屬於哪個類別
+                name=stmt.name,                   # 用於 LOC 識別
+                lineno=stmt.lineno,               # 用於 LOC 計算
+                end_lineno=end_lineno,            # 用於 LOC 計算
+                real_loc=real_loc,        # [新增] 儲存過濾後的行數
+                parent_class=self.current_class   # 用於 LCOM4 歸屬
             )
 
             for src in incoming_ids:
                 self._connect_with_context(src, func_id)
 
-            # --- 更新 Context ---
+            # [新增] 更新 Context 並遞迴
             prev_method = self.current_method
             self.current_method = stmt.name
-
             self._process_block(stmt.body, [func_id])
-
             self.current_method = prev_method
-            # ---------------------
 
             return [func_id]
 
@@ -273,25 +293,23 @@ class PythonSourceParser:
                                 break
                     if is_abstract: break
 
-            # 儲存 metadata: is_abstract, lineno
+            # [關鍵修改] add_node 時傳入 name, lineno, is_abstract
             class_id = self.graph.add_node(
-                f"class {stmt.name}:",
+                f"class {stmt.name}",
                 node_type="class",
-                lineno=stmt.lineno,      # LOC 支援
-                is_abstract=is_abstract  # 抽象度支援
+                name=stmt.name,            # 用於 LCOM4 識別
+                lineno=stmt.lineno,        # 用於 LOC (雖然類別通常不用 LOC，但為了完整性)
+                is_abstract=is_abstract    # 用於抽象度計算 (請確認 is_abstract 變數已計算)
             )
 
             for src in incoming_ids:
                 self._connect_with_context(src, class_id)
 
-            # --- 更新 Context ---
+            # [新增] 更新 Context 並遞迴
             prev_class = self.current_class
             self.current_class = stmt.name # 設定當前類別
-
             self._process_block(stmt.body, [class_id])
-
-            self.current_class = prev_class # 還原 Context
-            # ---------------------
+            self.current_class = prev_class # 還原
 
             return [class_id]
 
@@ -305,14 +323,12 @@ class PythonSourceParser:
                 # 就像這個註解節點不存在一樣。
                 return incoming_ids
             # ---------------------------------------
-# --- LCOM4 關鍵：提取使用的實例屬性 (Field Access) ---
+# [新增] LCOM4 關鍵：提取使用的實例屬性 (Field Access)
             used_fields = set()
-            # 如果我們在一個類別的方法內
             if self.current_class and self.current_method:
                 for node in ast.walk(stmt):
                     # 尋找 self.xxx 的模式
                     if isinstance(node, ast.Attribute):
-                        # 檢查是否為 self.屬性
                         if isinstance(node.value, ast.Name) and node.value.id == 'self':
                             used_fields.add(node.attr)
             # --------------------------------------------------
