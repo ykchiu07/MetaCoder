@@ -1,0 +1,101 @@
+{
+    "module_name": "Analyzer",
+    "functions": [
+        {
+            "name": "calculate_moving_average",
+            "access": "public",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[dict]"
+                },
+                {
+                    "name": "period",
+                    "type": "int"
+                }
+            ],
+            "return_type": "list[float]",
+            "docstring": "Calculates the simple moving average for a given period.  Input data should be a list of dictionaries, where each dictionary represents a data point and contains a 'close' key representing the closing price.  Returns a list of moving average values.  Raises ValueError if period is invalid (<=0 or greater than the data length).  Handles cases where the data length is less than the period by returning an empty list."
+        },
+        {
+            "name": "calculate_rsi",
+            "access": "public",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[dict]"
+                },
+                {
+                    "name": "period",
+                    "type": "int"
+                }
+            ],
+            "return_type": "list[float]",
+            "docstring": "Calculates the Relative Strength Index (RSI) for a given period. Input data should be a list of dictionaries, where each dictionary represents a data point and contains a 'close' key representing the closing price. Returns a list of RSI values. Raises ValueError if period is invalid (<=0 or greater than the data length). Handles cases where the data length is less than the period by returning an empty list."
+        },
+        {
+            "name": "generate_trading_signals",
+            "access": "public",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[dict]"
+                },
+                {
+                    "name": "indicators",
+                    "type": "dict"
+                }
+            ],
+            "return_type": "list[dict]",
+            "docstring": "Generates trading signals based on the provided data and calculated indicators.  The 'data' is a list of dictionaries, each representing a data point with 'close' prices. The 'indicators' dictionary contains calculated technical indicators (e.g., moving averages, RSI, MACD).  Returns a list of trading signal dictionaries, each containing 'signal' (buy/sell/hold) and 'confidence' (0.0-1.0) keys.  Handles cases where indicators are missing or invalid by returning an empty list."
+        },
+        {
+            "name": "_validate_data",
+            "access": "private",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[dict]"
+                }
+            ],
+            "return_type": "bool",
+            "docstring": "Validates the input data. Checks if the data is a list of dictionaries and if each dictionary contains a 'close' key. Returns True if the data is valid, False otherwise."
+        },
+        {
+            "name": "_calculate_average",
+            "access": "private",
+            "args": [
+                {
+                    "name": "values",
+                    "type": "list[float]"
+                }
+            ],
+            "return_type": "float",
+            "docstring": "Calculates the average of a list of floating-point numbers. Returns 0.0 if the list is empty."
+        },
+        {
+            "name": "_calculate_gain_loss",
+            "access": "private",
+            "args": [
+                {
+                    "name": "prices",
+                    "type": "list[float]"
+                }
+            ],
+            "return_type": "list[float]",
+            "docstring": "Calculates the gain/loss values from a list of prices. Returns an empty list if the input list is empty or contains only one element."
+        },
+        {
+            "name": "_smooth_values",
+            "access": "private",
+            "args": [
+                {
+                    "name": "values",
+                    "type": "list[float]"
+                }
+            ],
+            "return_type": "list[float]",
+            "docstring": "Applies a smoothing function (e.g., Wilder's smoothing) to a list of values. Returns an empty list if the input list is empty."
+        }
+    ]
+}

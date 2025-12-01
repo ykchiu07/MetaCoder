@@ -1,0 +1,96 @@
+{
+    "module_name": "DataFetcher",
+    "functions": [
+        {
+            "name": "fetch_data",
+            "access": "public",
+            "args": [
+                {
+                    "name": "ticker",
+                    "type": "str"
+                },
+                {
+                    "name": "start_date",
+                    "type": "str"
+                },
+                {
+                    "name": "end_date",
+                    "type": "str"
+                }
+            ],
+            "return_type": "list[dict]",
+            "docstring": "Retrieves stock price data for a given ticker symbol within a specified date range.  The data is returned as a list of dictionaries, where each dictionary represents a single data point (e.g., date, open, high, low, close, volume).  Handles data source configuration and error handling.  Raises ValueError if the date format is invalid or the ticker is not supported. Returns an empty list if no data is found within the specified date range."
+        },
+        {
+            "name": "configure_data_source",
+            "access": "public",
+            "args": [
+                {
+                    "name": "source_type",
+                    "type": "str"
+                },
+                {
+                    "name": "config",
+                    "type": "dict"
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Configures the data source for fetching stock prices.  The 'source_type' specifies the type of data source (e.g., 'api', 'csv'). The 'config' dictionary contains the necessary configuration parameters for the specified data source.  This function updates the internal configuration. Raises ValueError if the source_type is invalid or the config is malformed."
+        },
+        {
+            "name": "_get_data_source",
+            "access": "private",
+            "args": [],
+            "return_type": "object",
+            "docstring": "Retrieves the configured data source object based on the configured source type.  This is an internal helper function and should not be called directly from outside the module. Returns None if no data source is configured."
+        },
+        {
+            "name": "_validate_date_format",
+            "access": "private",
+            "args": [
+                {
+                    "name": "date_string",
+                    "type": "str"
+                }
+            ],
+            "return_type": "bool",
+            "docstring": "Validates the format of a date string.  Returns True if the date string is in a supported format, False otherwise.  This is an internal helper function."
+        },
+        {
+            "name": "_handle_api_error",
+            "access": "private",
+            "args": [
+                {
+                    "name": "response",
+                    "type": "object"
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Handles errors returned by the API. Logs the error and potentially retries the request. This is an internal helper function."
+        },
+        {
+            "name": "_read_csv_data",
+            "access": "private",
+            "args": [
+                {
+                    "name": "file_path",
+                    "type": "str"
+                }
+            ],
+            "return_type": "list[dict]",
+            "docstring": "Reads stock price data from a CSV file. Returns a list of dictionaries, where each dictionary represents a single data point. Returns an empty list if the file is not found or if there is an error reading the file. This is an internal helper function."
+        },
+        {
+            "name": "_get_api_endpoint",
+            "access": "private",
+            "args": [
+                {
+                    "name": "ticker",
+                    "type": "str"
+                }
+            ],
+            "return_type": "str",
+            "docstring": "Constructs the API endpoint URL based on the ticker symbol and configured API settings. This is an internal helper function."
+        }
+    ]
+}

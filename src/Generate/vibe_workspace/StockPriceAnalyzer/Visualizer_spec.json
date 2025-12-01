@@ -1,0 +1,118 @@
+{
+    "module_name": "Visualizer",
+    "functions": [
+        {
+            "name": "plot_stock_price",
+            "access": "public",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[dict]",
+                    "description": "A list of dictionaries, where each dictionary represents a data point with 'date' (str) and 'price' (float) keys."
+                },
+                {
+                    "name": "title",
+                    "type": "str",
+                    "description": "The title of the plot."
+                },
+                {
+                    "name": "filename",
+                    "type": "str",
+                    "description": "The filename (including extension, e.g., 'stock_price.png') to save the plot to."
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Generates a line chart of the stock price over time and saves it to a file.  The chart will have the specified title.  The data is expected to be sorted by date.  Supports PNG, JPG, and PDF formats.  Raises ValueError if data is invalid or filename is not supported."
+        },
+        {
+            "name": "plot_indicator",
+            "access": "public",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[float]",
+                    "description": "A list of floating-point numbers representing the indicator values."
+                },
+                {
+                    "name": "indicator_name",
+                    "type": "str",
+                    "description": "The name of the indicator (e.g., 'SMA', 'RSI'). This will be used as the plot title."
+                },
+                {
+                    "name": "filename",
+                    "type": "str",
+                    "description": "The filename (including extension, e.g., 'rsi.png') to save the plot to."
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Generates a line chart of the indicator values and saves it to a file. The chart will have the specified indicator name as the title. Supports PNG, JPG, and PDF formats. Raises ValueError if data is invalid or filename is not supported."
+        },
+        {
+            "name": "generate_report",
+            "access": "public",
+            "args": [
+                {
+                    "name": "analysis_results",
+                    "type": "dict",
+                    "description": "A dictionary containing the analysis results. The structure of this dictionary is determined by the Analyzer module."
+                },
+                {
+                    "name": "filename",
+                    "type": "str",
+                    "description": "The filename (including extension, e.g., 'analysis_report.pdf') to save the report to."
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Generates a comprehensive report summarizing the stock analysis results and saves it to a file. The report includes textual summaries and visualizations (if applicable). Supports PDF and HTML formats.  The format of the 'analysis_results' dictionary is defined by the Analyzer module. Raises ValueError if filename is not supported."
+        },
+        {
+            "name": "_validate_filename",
+            "access": "private",
+            "args": [
+                {
+                    "name": "filename",
+                    "type": "str",
+                    "description": "The filename to validate."
+                }
+            ],
+            "return_type": "bool",
+            "docstring": "Checks if the given filename has a supported extension (e.g., .png, .jpg, .pdf, .html)."
+        },
+        {
+            "name": "_create_plot",
+            "access": "private",
+            "args": [
+                {
+                    "name": "data",
+                    "type": "list[dict]",
+                    "description": "A list of dictionaries representing data points."
+                },
+                {
+                    "name": "title",
+                    "type": "str",
+                    "description": "The title of the plot."
+                },
+                {
+                    "name": "filename",
+                    "type": "str",
+                    "description": "The filename to save the plot to."
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Internal helper function to create and save a basic line plot. Handles plotting library initialization and common plotting parameters."
+        },
+        {
+            "name": "_generate_report_content",
+            "access": "private",
+            "args": [
+                {
+                    "name": "analysis_results",
+                    "type": "dict",
+                    "description": "A dictionary containing the analysis results."
+                }
+            ],
+            "return_type": "str",
+            "docstring": "Generates the textual content and any embedded visualizations for the report.  This function is responsible for formatting the analysis results into a human-readable report."
+        }
+    ]
+}
