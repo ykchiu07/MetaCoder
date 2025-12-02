@@ -1,0 +1,122 @@
+{
+    "module_name": "data_fetcher",
+    "class_name": "DataFetcher",
+    "functions": [
+        {
+            "name": "__init__",
+            "access": "public",
+            "args": [
+                {
+                    "name": "self",
+                    "type": "Any"
+                },
+                {
+                    "name": "api_keys",
+                    "type": "dict",
+                    "description": "Dictionary containing API keys for different providers. Example: {'provider_a': 'key1', 'provider_b': 'key2'}"
+                }
+            ],
+            "return_type": "None",
+            "docstring": "Initializes the DataFetcher with API keys.\n\nArgs:\n    api_keys (dict): A dictionary of API keys.  Keys are provider names, values are API keys."
+        },
+        {
+            "name": "fetch_historical_data",
+            "access": "public",
+            "args": [
+                {
+                    "name": "self",
+                    "type": "Any"
+                },
+                {
+                    "name": "ticker",
+                    "type": "str",
+                    "description": "Stock ticker symbol (e.g., 'AAPL')."
+                },
+                {
+                    "name": "start_date",
+                    "type": "str",
+                    "description": "Start date for historical data (YYYY-MM-DD)."
+                },
+                {
+                    "name": "end_date",
+                    "type": "str",
+                    "description": "End date for historical data (YYYY-MM-DD)."
+                }
+            ],
+            "return_type": "list",
+            "docstring": "Fetches historical stock data for a given ticker and date range.\n\nArgs:\n    ticker (str): Stock ticker symbol.\n    start_date (str): Start date (YYYY-MM-DD).\n    end_date (str): End date (YYYY-MM-DD).\n\nReturns:\n    list: A list of historical data points (e.g., list of dictionaries), or None if an error occurs.\n\nRaises:\n    ValueError: If start_date or end_date are invalid.\n    Exception: For API request failures or data parsing errors."
+        },
+        {
+            "name": "fetch_current_price",
+            "access": "public",
+            "args": [
+                {
+                    "name": "self",
+                    "type": "Any"
+                },
+                {
+                    "name": "ticker",
+                    "type": "str",
+                    "description": "Stock ticker symbol (e.g., 'AAPL')."
+                }
+            ],
+            "return_type": "float",
+            "docstring": "Fetches the current price of a stock.\n\nArgs:\n    ticker (str): Stock ticker symbol.\n\nReturns:\n    float: The current price of the stock, or None if an error occurs.\n\nRaises:\n    Exception: For API request failures or data parsing errors."
+        },
+        {
+            "name": "fetch_company_profile",
+            "access": "public",
+            "args": [
+                {
+                    "name": "self",
+                    "type": "Any"
+                },
+                {
+                    "name": "ticker",
+                    "type": "str",
+                    "description": "Stock ticker symbol (e.g., 'AAPL')."
+                }
+            ],
+            "return_type": "dict",
+            "docstring": "Fetches the company profile for a given ticker.\n\nArgs:\n    ticker (str): Stock ticker symbol.\n\nReturns:\n    dict: A dictionary containing company profile information, or None if an error occurs.\n\nRaises:\n    Exception: For API request failures or data parsing errors."
+        },
+        {
+            "name": "_validate_date",
+            "access": "private",
+            "args": [
+                {
+                    "name": "self",
+                    "type": "Any"
+                },
+                {
+                    "name": "date_string",
+                    "type": "str"
+                }
+            ],
+            "return_type": "bool",
+            "docstring": "Validates a date string in YYYY-MM-DD format.\n\nArgs:\n    date_string (str): The date string to validate.\n\nReturns:\n    bool: True if the date is valid, False otherwise.\n\nRaises:\n    ValueError: If the date string is not in the correct format."
+        },
+        {
+            "name": "_make_api_request",
+            "access": "private",
+            "args": [
+                {
+                    "name": "self",
+                    "type": "Any"
+                },
+                {
+                    "name": "api_endpoint",
+                    "type": "str",
+                    "description": "The API endpoint URL."
+                },
+                {
+                    "name": "params",
+                    "type": "dict",
+                    "description": "Dictionary of query parameters for the API request."
+                }
+            ],
+            "return_type": "dict",
+            "docstring": "Makes an API request and returns the response.\n\nArgs:\n    api_endpoint (str): The API endpoint URL.\n    params (dict): Dictionary of query parameters.\n\nReturns:\n    dict: The API response as a dictionary, or None if an error occurs.\n\nRaises:\n    Exception: For API request failures or data parsing errors."
+        }
+    ]
+}
