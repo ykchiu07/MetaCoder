@@ -2,13 +2,14 @@ import os
 import json
 import time
 import re
-from typing import List, Any
+from typing import List, Dict, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from OllamaClient import OllamaClient
 
 @dataclass
 class ImplementationResult:
+    function_name: str
     file_path: str
     model_entropy: float
     duration: float
@@ -19,36 +20,33 @@ class CodeImplementer:
         self.client = OllamaClient(ollama_url)
 
     def _extract_python_code(self, text: str) -> str:
-        # 優先匹配 ```python
+        # 優先匹配 ```python ... ```
         match = re.search(r"```python\s*(.*?)\s*```", text, re.DOTALL)
         if match: return match.group(1)
-        # 其次匹配 ```
+        # 其次匹配 ``` ... ```
         match = re.search(r"```\s*(.*?)\s*```", text, re.DOTALL)
         if match: return match.group(1)
         return text
 
-    def generateFunctionCode(self, spec_path: str, target_fragment_path: str, model_name: str) -> ImplementationResult:
-        """實作單一函式"""
+    def _implement_single_function(self, spec_data: Dict, func_name: str, module_dir: str, model_name: str) -> ImplementationResult:
+        """(內部方法) 實作單一函式"""
         start_time = time.time()
 
-        if not os.path.exists(spec_path):
-            return ImplementationResult(target_fragment_path, -1.0, 0.0, False)
+        # 1. 推導檔案路徑
+        filename = "__init_logic__.py" if func_name == "__init__" else f"{func_name}.py"
+        target_path = os.path.join(module_dir, filename)
 
-        with open(spec_path, 'r', encoding='utf-8') as f:
-            spec_data = json.load(f)
-
-        func_name = os.path.splitext(os.path.basename(target_fragment_path))[0]
-        if func_name == "__init_logic__": func_name = "__init__"
-
+        # 2. 獲取函式規格
         target_func_spec = next((f for f in spec_data.get('functions', []) if f['name'] == func_name), None)
         if not target_func_spec:
-            return ImplementationResult(target_fragment_path, -1.0, 0.0, False)
+            print(f"[!] Spec not found for function: {func_name}")
+            return ImplementationResult(func_name, target_path, -1.0, 0.0, False)
 
         print(f"    > Implementing {func_name} with {model_name}...")
 
+        # 3. 準備 Prompt
         module_name = spec_data.get('module_name', 'unknown_module')
         class_name = spec_data.get('class_name', None)
-
         context_str = f"Module: {module_name}\nClass: {class_name}" if class_name else f"Module: {module_name}"
 
         func_signature = (
@@ -77,36 +75,51 @@ class CodeImplementer:
             content_str, entropy = self.client.chat_complete_raw(model_name, system_prompt, user_prompt)
             code_body = self._extract_python_code(content_str)
 
-            # 簡單補全 Import，避免語法檢查報錯
+            # 簡單補全 Import
             final_code = code_body
             if "import " not in code_body and ("List" in code_body or "Dict" in code_body):
                 final_code = "from typing import List, Dict, Any, Optional\n\n" + code_body
 
-            with open(target_fragment_path, 'w', encoding='utf-8') as f:
+            with open(target_path, 'w', encoding='utf-8') as f:
                 f.write(final_code)
 
-            return ImplementationResult(target_fragment_path, entropy, time.time() - start_time, True)
+            return ImplementationResult(func_name, target_path, entropy, time.time() - start_time, True)
 
         except Exception as e:
             print(f"[!] Error implementing {func_name}: {e}")
-            return ImplementationResult(target_fragment_path, -1.0, 0.0, False)
+            return ImplementationResult(func_name, target_path, -1.0, 0.0, False)
 
-def implement_module_functions_parallel(spec_path: str, fragment_paths: List[str], model_name: str, max_workers: int = 2) -> List[ImplementationResult]:
-    """雙執行緒並行實作"""
-    implementer = CodeImplementer()
-    results = []
-    print(f"[*] Starting parallel implementation with {max_workers} threads...")
+    def generateFunctionCode(self, spec_path: str, target_function_names: List[str], model_name: str, max_workers: int = 2) -> List[ImplementationResult]:
+        """
+        批次實作函式
+        Args:
+            spec_path: spec.json 的路徑
+            target_function_names: 要實作的函式名稱列表 (例如 ['login', 'logout'])
+            model_name: 使用的模型名稱
+            max_workers: 並行執行緒數 (建議配合 OLLAMA_NUM_PARALLEL 使用)
+        """
+        if not os.path.exists(spec_path):
+            raise FileNotFoundError(f"Spec file not found: {spec_path}")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_path = {
-            executor.submit(implementer.generateFunctionCode, spec_path, path, model_name): path
-            for path in fragment_paths
-        }
+        with open(spec_path, 'r', encoding='utf-8') as f:
+            spec_data = json.load(f)
 
-        for future in as_completed(future_to_path):
-            res = future.result()
-            results.append(res)
-            status = "Success" if res.success else "Failed"
-            print(f"    [Thread Done] {os.path.basename(res.file_path)}: {status}")
+        module_dir = os.path.dirname(spec_path)
+        results = []
 
-    return results
+        print(f"[*] Starting implementation for {len(target_function_names)} functions...")
+
+        # 使用 ThreadPoolExecutor 進行並行處理
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_name = {
+                executor.submit(self._implement_single_function, spec_data, name, module_dir, model_name): name
+                for name in target_function_names
+            }
+
+            for future in as_completed(future_to_name):
+                res = future.result()
+                results.append(res)
+                status = "Success" if res.success else "Failed"
+                print(f"    [Done] {res.function_name}: {status} (Entropy: {res.model_entropy})")
+
+        return results

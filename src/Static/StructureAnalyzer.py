@@ -144,31 +144,7 @@ class StructureAnalyzer:
 
         return results
 
-    # --- 3. 程式碼行數 (LOC) [函式內] ---
-    # 修改 calculateLOC
-    def calculateLOC(self, module_name: str) -> dict:
-        """
-        回傳過濾後的真實行數 (Real LOC)。
-        """
-        graph = self.graphs.get(module_name)
-        if not graph: return {}
-
-        results = {}
-        for _, d in graph.graph.nodes(data=True):
-            if d.get('type') == 'function':
-                # [修改] 優先使用 real_loc，若無則回退到舊算法
-                if 'real_loc' in d:
-                    loc = d['real_loc']
-                else:
-                    # Fallback
-                    start = d.get('lineno', 0)
-                    end = d.get('end_lineno', start)
-                    loc = end - start + 1
-
-                results[d.get('name')] = loc
-        return results
-
-    # --- 4. 穩定性 (Instability) [模組間] ---
+    # --- 3. 穩定性 (Instability) [模組間] ---
     def calculateInstability(self, module_name: str) -> float:
         """
         計算穩定性指標 I。
@@ -192,7 +168,7 @@ class StructureAnalyzer:
 
         return round(ce / (ca + ce), 2)
 
-    # --- 5. 抽象度 (Abstractness) [模組內] ---
+    # --- 4. 抽象度 (Abstractness) [模組內] ---
     def calculateAbstractness(self, module_name: str) -> float:
         """
         計算抽象度 A。
