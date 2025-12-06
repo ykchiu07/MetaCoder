@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from OllamaClient import OllamaClient
 
+import threading # 新增引用
+
 @dataclass
 class ImplementationResult:
     function_name: str
@@ -128,7 +130,8 @@ class CodeImplementer:
         target_function_names: List[str],
         model_name: str= "gemma3:12b",
         max_workers: int = 2,
-        feedback_map: Dict[str, str] = None  # [新增] Key: func_name, Value: report_string
+        feedback_map: Dict[str, str] = None,  # [新增] Key: func_name, Value: report_string
+        cancel_event: threading.Event = None  # [新增] 接收取消旗標
     ) -> List[ImplementationResult]:
 
         if not os.path.exists(spec_path):
@@ -146,6 +149,10 @@ class CodeImplementer:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_name = {}
             for name in target_function_names:
+                # [關鍵修正] 在提交任務前檢查取消
+                if cancel_event and cancel_event.is_set():
+                    print("[CodeImplementer] Task Cancelled by User.")
+                    break # 停止提交新任務
                 # 取得該函式對應的回饋報告 (如果有的話)
                 report = feedback_map.get(name)
                 future = executor.submit(
@@ -155,6 +162,9 @@ class CodeImplementer:
                 future_to_name[future] = name
 
             for future in as_completed(future_to_name):
+                # 這裡也可以再次檢查，如果已取消則不收集結果或做標記
+                if cancel_event and cancel_event.is_set():
+                    continue
                 res = future.result()
                 results.append(res)
                 action = "Fixed" if feedback_map.get(res.function_name) else "Implemented"

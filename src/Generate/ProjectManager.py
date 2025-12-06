@@ -5,6 +5,8 @@ from typing import Dict, Any, List
 from dataclasses import dataclass
 from OllamaClient import OllamaClient
 
+import threading # 新增引用
+
 @dataclass
 class GenerationResult:
     structure_file_path: str
@@ -63,7 +65,7 @@ class ProjectManager:
 
         return GenerationResult(arch_path, project_dir, entropy, time.time() - start_time)
 
-    def generateModuleDetail(self, architecture_path: str, target_module_name: str, progress_data: Dict[str, Any], model_name: str) -> ModuleDetailResult:
+    def generateModuleDetail(self, architecture_path: str, target_module_name: str, progress_data: Dict[str, Any], model_name: str,cancel_event: threading.Event = None ) -> ModuleDetailResult:
         """
         (Phase 2) 單一模組細化
         **優化重點**：強化參數完整性 Prompt
@@ -124,6 +126,11 @@ class ProjectManager:
             "}"
         )
 
+        # 在生成 Spec 之前檢查
+        if cancel_event and cancel_event.is_set():
+            print("[ProjectManager] Operation Cancelled.")
+            return None
+
         spec_data, entropy, _ = self.client.chat_complete_json(model_name, system_prompt, f"Context:\n{context_str}")
 
         spec_path = os.path.join(mod_dir, "spec.json")
@@ -131,6 +138,11 @@ class ProjectManager:
             json.dump(spec_data, f, indent=4, ensure_ascii=False)
 
         fragment_paths = []
+
+        for func in spec_data.get('functions', []):
+            if cancel_event and cancel_event.is_set():
+                print("[ProjectManager] Fragment generation cancelled.")
+                break
 
         # 建立 __init__.py
         init_py_path = os.path.join(mod_dir, "__init__.py")
