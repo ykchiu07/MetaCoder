@@ -138,39 +138,3 @@ class ASTGraph:
         plt.title("Pseudocode AST Graph Visualization")
         plt.axis('off')
         plt.show()
-
-# --- 使用範例 ---
-
-if __name__ == "__main__":
-    # 1. 實例化
-    ast = ASTGraph()
-
-    # 2. 建立節點 (模擬一個簡單的迴圈程式)
-    # Start -> Input n -> if n < 5 -> print "Small" -> End
-    #                     else -> n = n - 1 (Loop back)
-
-    start_node = ast.add_node("Start", node_type="start")
-    input_node = ast.add_node("Input n", node_type="io")
-    decision_node = ast.add_node("Is n < 5?", node_type="decision")
-    process_true = ast.add_node("Print 'Small'", node_type="io")
-    process_false = ast.add_node("n = n - 1", node_type="process")
-    end_node = ast.add_node("End", node_type="end")
-
-    # 3. 連接流程 (定義邊與條件)
-    ast.add_edge(start_node, input_node)
-    ast.add_edge(input_node, decision_node)
-
-    # 分支：True
-    ast.add_edge(decision_node, process_true, condition="Yes")
-    ast.add_edge(process_true, end_node)
-
-    # 分支：False (迴圈)
-    ast.add_edge(decision_node, process_false, condition="No")
-    ast.add_edge(process_false, decision_node) # 連回判斷點形成迴圈
-
-    # 4. 存取測試
-    print(f"Root Node ID: {ast.root_id}")
-    print(f"Decision Node Next Steps: {ast.get_next_steps(decision_node)}")
-
-    # 5. 視覺化
-    # ast.visualize() # 若在 Jupyter Notebook 或本地環境可取消註解此行以查看圖形
