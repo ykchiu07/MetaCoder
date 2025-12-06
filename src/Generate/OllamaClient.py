@@ -1,6 +1,7 @@
 import requests
 import json
-from typing import Dict, Tuple, Optional, Any
+import os
+from typing import Dict, Tuple, Optional, List, Any
 import subprocess
 
 class OllamaClient:
@@ -54,21 +55,35 @@ class OllamaClient:
             print(f"[OllamaClient Error] {e}")
             raise
 
-    # 修改此方法簽名與實作
     def chat_complete_raw(
         self,
         model: str,
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.3,
-        images: Optional[List[str]] = None # 新增 images 參數
+        images: Optional[List[str]] = None
     ) -> Tuple[str, float]:
-        """發送請求並回傳原始字串"""
+        """
+        發送請求並回傳原始字串。
+        [修正] 自動讀取 images 路徑並轉為 Base64 編碼。
+        """
+
+        # 處理圖片轉 Base64
+        b64_images = []
+        if images:
+            for img_path in images:
+                if os.path.exists(img_path):
+                    try:
+                        with open(img_path, "rb") as image_file:
+                            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                            b64_images.append(encoded_string)
+                    except Exception as e:
+                        print(f"[OllamaClient] Failed to encode image {img_path}: {e}")
 
         # 構建 User Message
         user_msg = {"role": "user", "content": user_prompt}
-        if images:
-            user_msg["images"] = images  # Ollama API 支援此格式
+        if b64_images:
+            user_msg["images"] = b64_images
 
         payload = {
             "model": model,
@@ -88,4 +103,5 @@ class OllamaClient:
             return content_str, entropy
         except Exception as e:
             print(f"[OllamaClient Error] {e}")
-            raise
+            # 回傳錯誤訊息與預設熵值
+            return f"Error: {str(e)}", -1.0
