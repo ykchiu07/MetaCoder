@@ -54,15 +54,30 @@ class OllamaClient:
             print(f"[OllamaClient Error] {e}")
             raise
 
-    def chat_complete_raw(self, model: str, system_prompt: str, user_prompt: str, temperature: float = 0.3) -> Tuple[str, float]:
-        """發送請求並回傳原始字串 (用於生成程式碼)"""
+    # 修改此方法簽名與實作
+    def chat_complete_raw(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.3,
+        images: Optional[List[str]] = None # 新增 images 參數
+    ) -> Tuple[str, float]:
+        """發送請求並回傳原始字串"""
+
+        # 構建 User Message
+        user_msg = {"role": "user", "content": user_prompt}
+        if images:
+            user_msg["images"] = images  # Ollama API 支援此格式
+
         payload = {
             "model": model,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            "messages": [{"role": "system", "content": system_prompt}, user_msg],
             "stream": False,
             "logprobs": True,
             "options": {"temperature": temperature}
         }
+
         try:
             response = requests.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()

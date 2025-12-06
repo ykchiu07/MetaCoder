@@ -63,6 +63,10 @@ class CodeImplementer:
             "2. Handle edge cases and potential errors. "
             "3. Do NOT output a Class definition, just the method body/function. "
             "4. Respect the arguments provided in the specification."
+            "5. If the function involves Graphical User Interface (GUI), YOU MUST USE 'tkinter'.\n"
+            "   - Do NOT use PyQt, PySide, Kivy, or wxPython.\n"
+            "   - The system's runtime analysis tools are hooked into tkinter only.\n"
+            "   - Using other GUI libraries will cause the build to fail."
         )
 
         user_prompt = (
