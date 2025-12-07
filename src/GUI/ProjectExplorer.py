@@ -94,12 +94,26 @@ class ProjectExplorer:
             except: pass
         return {}
 
+    def _load_functions_to_tree(self, mod_node, mod_dir, spec_path):
+        """[Refactor] 提取這個邏輯以支援 Main 和普通 Module"""
+        status_map = self._get_status_map(mod_dir)
+        try:
+            with open(spec_path, 'r', encoding='utf-8') as f:
+                spec = json.load(f)
+            for func in spec.get('functions', []):
+                fname = func['name']
+                display_text = fname
+                if status_map.get(fname, {}).get('status') == 'implemented':
+                    display_text += " ✔"
+                self.tree.insert(mod_node, "end", text=display_text, values=("function", spec_path))
+        except Exception as e:
+            print(f"[Explorer] Spec load error: {e}")
+
     def refresh_tree(self):
         if self._is_refreshing: return
         self._is_refreshing = True
         try:
             expanded_nodes = self._save_expanded_state()
-            # 清空時也要清空 loading set，避免 ID 參照錯誤
             self._loading_items.clear()
             self.tree.delete(*self.tree.get_children())
 
@@ -115,6 +129,21 @@ class ProjectExplorer:
             else:
                 project_base_dir = self.meta.workspace_root
 
+            # --- [Fix 1] 顯示 Main Entry Point ---
+            entry_point = data.get('entry_point')
+            if entry_point:
+                # 假設 entry_point 是一個檔案 (如 main.py)，我們將其視為一個特殊模組 "main"
+                # 或者直接去讀 main/spec.json (這是 MetaCoder._create_main_entry_spec 的邏輯)
+                main_mod_name = "main" # 根據 MetaCoder 的邏輯，它被放在 main 資料夾
+                main_node = self.tree.insert(root, "end", text=main_mod_name, open=True, values=("module",))
+
+                mod_dir = os.path.join(project_base_dir, main_mod_name)
+                spec_path = os.path.join(mod_dir, "spec.json")
+                if os.path.exists(spec_path):
+                    self.tree.item(main_node, values=("module", spec_path))
+                    self._load_functions_to_tree(main_node, mod_dir, spec_path)
+            # ------------------------------------
+
             modules = data.get('modules', [])
             for mod in modules:
                 mod_name = mod['name']
@@ -125,32 +154,11 @@ class ProjectExplorer:
 
                 if os.path.exists(spec_path):
                     self.tree.item(mod_node, values=("module", spec_path))
-
-                    # [新增] 讀取狀態檔
-                    status_map = self._get_status_map(mod_dir)
-
-                    try:
-                        with open(spec_path, 'r', encoding='utf-8') as f:
-                            spec = json.load(f)
-
-                        for func in spec.get('functions', []):
-                            fname = func['name']
-                            display_text = fname
-
-                            # [新增] 檢查狀態並打勾
-                            if status_map.get(fname) == "implemented":
-                                display_text += " ✔"
-
-                            self.tree.insert(mod_node, "end", text=display_text, values=("function", spec_path))
-                    except Exception as e:
-                        print(f"[Explorer] Spec load error: {e}")
+                    self._load_functions_to_tree(mod_node, mod_dir, spec_path)
 
             self._restore_expanded_state(expanded_nodes)
         finally:
             self._is_refreshing = False
-
-    # ... 其他 helper methods (_init_menu, on_select, context menu 等) 保持原樣 ...
-    # 這裡省略以節省篇幅，請保留原本的代碼
 
     def _init_menu(self):
         self.menu = tk.Menu(self.frame, tearoff=0)
@@ -252,7 +260,8 @@ class ProjectExplorer:
         for item in items:
             vals = self.tree.item(item, "values")
             if vals and vals[0] == "module":
-                target_modules.append(self.tree.item(item, "text"))
+                mod_name = self.tree.item(item, "text").split(" ")[0] # 去掉可能存在的spinner或checkmark
+                target_modules.append(mod_name)
 
         if not target_modules: return
 
@@ -261,33 +270,34 @@ class ProjectExplorer:
                 if self.mediator._current_cancel_flag.is_set(): break
                 self.mediator.log(f"[Action] Refining module '{mod}'...")
 
+                # --- [Fix 3] 在 UI 線程設置 loading ---
+                self.frame.after(0, lambda m=mod: self.set_item_loading(m, True))
+
                 res = self.mediator.meta.refine_module(mod, cancel_event=self.mediator._current_cancel_flag)
 
                 if res is None:
                     self.mediator.log(f"[Fail] Refinement of {mod} failed/blocked.")
 
-            self.frame.after(0, self.refresh_tree) # 刷新會清除 loading
+                # 完成後移除 loading (refresh_tree 會處理，但保險起見)
+                self.frame.after(0, lambda m=mod: self.set_item_loading(m, False))
+
+            self.frame.after(0, self.refresh_tree)
 
         self.mediator.run_async(task)
 
     def on_implement(self):
         items = self.tree.selection()
-        # tasks 結構: { (mod_name, spec_path): [func_name1, func_name2] }
         tasks = {}
 
         for item in items:
             vals = self.tree.item(item, "values")
             if vals and vals[0] == "function":
-                # 去除狀態符號
                 raw_text = self.tree.item(item, "text")
                 fname = raw_text.split(" ")[0]
-
-                # 如果已經實作過 (有 ✔)，詢問是否重新實作？(這裡簡化：直接允許)
-
                 spec_path = vals[1]
-                # 獲取模組名稱 (上一層節點的 text)
                 parent_id = self.tree.parent(item)
-                mod_name = self.tree.item(parent_id, "text")
+                # 注意：這裡也要處理 spinner 的情況，取 split[0]
+                mod_name = self.tree.item(parent_id, "text").split(" ")[0]
 
                 key = (mod_name, spec_path)
                 if key not in tasks: tasks[key] = []
@@ -298,24 +308,24 @@ class ProjectExplorer:
         # 1. 檢查依賴 & 排程
         for (mod_name, spec_path), funcs in tasks.items():
 
-            # [依賴鎖定]
-            if not self.meta.check_dependencies_met(mod_name):
+            # [Fix 2] 強制依賴檢查並確保彈窗
+            is_met = self.meta.check_dependencies_met(mod_name)
+            print(f"[Debug] Dependency check for {mod_name}: {is_met}") # Debug Log
+
+            if not is_met:
                 msg = f"Cannot implement module '{mod_name}'.\nDependencies not met.\n\nPlease implement dependent modules first."
                 self.mediator.log(f"[Blocked] {msg}")
-                # [Fix 5] 彈窗警告
                 tk.messagebox.showwarning("Dependency Error", msg)
-                continue
+                continue # 跳過此模組
 
             # 2. 為每個函式建立獨立任務
             for func in funcs:
-                self.set_item_loading(func, True) # 開始旋轉
+                self.set_item_loading(func, True)
 
-                # 使用 closure 捕捉變數
+                # (... Closure 設定保持不變 ...)
                 def make_task(s_path, f_name, m_name):
                     def task_func():
-                        # [Fix 2] 開始生成時顯示
                         self.mediator.log(f"[Action] Generating code for {f_name} (in {m_name})...")
-
                         result = self.meta.coder.implement_function_direct(
                             s_path, f_name,
                             self.meta.model_config['coder'],
@@ -324,11 +334,9 @@ class ProjectExplorer:
                         return result
 
                     def success_cb():
-                        # 停止旋轉，刷新樹狀圖 (會自動變為 ✔)
                         self.set_item_loading(f_name, False)
-                        self.refresh_tree() # 刷新以讀取 .status.json 更新 UI
+                        self.refresh_tree()
 
-                        # [新增] 自動在編輯器開啟
                         mod_dir = os.path.dirname(s_path)
                         code_path = os.path.join(mod_dir, "__init_logic__.py" if f_name == "__init__" else f"{f_name}.py")
                         if os.path.exists(code_path):
@@ -336,8 +344,6 @@ class ProjectExplorer:
                                 code = f.read()
                             self.mediator.workspace.open_file(f_name, code, code_path)
 
-                        # [新增] 顯示詳細資訊到 Intelligence Panel
-                        # 我們需要讀取最新的 status 來獲取 entropy
                         status_path = os.path.join(mod_dir, ".status.json")
                         try:
                             with open(status_path, 'r') as f: st = json.load(f)
@@ -348,6 +354,4 @@ class ProjectExplorer:
                     return task_func, success_cb
 
                 t_func, s_cb = make_task(spec_path, func, mod_name)
-
-                # 加入 MainWindow 的 Queue
                 self.mediator.run_async(t_func, success_callback=s_cb)

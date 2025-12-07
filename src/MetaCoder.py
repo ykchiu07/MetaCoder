@@ -465,42 +465,40 @@ class MetaCoder:
         print("[Meta] Workspace reset complete.")
 
     def check_dependencies_met(self, module_name: str) -> bool:
-        """
-        [新增] 檢查某模組的依賴是否都已經實作完畢。
-        規則：依賴模組必須至少有一個函式被標記為 implemented。
-        """
         if not self.current_architecture_path: return True
-
         try:
             with open(self.current_architecture_path, 'r') as f:
                 arch = json.load(f)
 
             mod_info = next((m for m in arch.get('modules', []) if m['name'] == module_name), None)
-            if not mod_info: return True
+            # 如果是 main，可能不在 modules 列表中，這裡假設 main 依賴所有 top-level modules
+            # 為求簡單，如果找不到 mod_info，我們預設它依賴所有已存在的模組 (這對 main 很有用)
+            dependencies = []
+            if mod_info:
+                dependencies = mod_info.get('dependencies', [])
+            elif module_name == 'main':
+                # 特例處理 main: 檢查所有其他模組是否 ready
+                dependencies = [m['name'] for m in arch.get('modules', [])]
 
             project_dir = os.path.dirname(self.current_architecture_path)
 
-            for dep in mod_info.get('dependencies', []):
-                # 檢查依賴模組的 status.json
+            for dep in dependencies:
                 status_path = os.path.join(project_dir, dep, ".status.json")
                 if not os.path.exists(status_path):
-                    print(f"[Dependency Check] {module_name} blocked: Dependency '{dep}' has no status file.")
+                    print(f"[Check] {module_name} blocked: {dep} missing status file.")
                     return False
 
-                # 檢查是否有任何 implemented 的函式
                 with open(status_path, 'r') as f:
                     status = json.load(f)
-                    # 簡單檢查：只要有任何 key 的 status 是 implemented 就算通過
-                    # 更嚴謹的檢查需要依賴細粒度的 function call graph，這裡先做模組級檢查
+                    # 只要有任何一個函式實作了，就當作該模組可用 (Low bar for MVP)
                     if not any(v.get('status') == 'implemented' for v in status.values()):
-                        print(f"[Dependency Check] {module_name} blocked: Dependency '{dep}' has no implemented functions.")
+                        print(f"[Check] {module_name} blocked: {dep} has no impl funcs.")
                         return False
 
-            return True
-
+            return True # All checks passed
         except Exception as e:
-            print(f"[Dependency Check] Error: {e}")
-            return True # 出錯時預設不擋，以免死鎖
+            print(f"[Check Error] {e}")
+            return True # Fail open to avoid deadlocks
 
 if __name__ == "__main__":
     app = MetaCoder()

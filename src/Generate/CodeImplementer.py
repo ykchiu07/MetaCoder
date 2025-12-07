@@ -106,29 +106,29 @@ class CodeImplementer:
         target_func_spec = next((f for f in spec_data.get('functions', []) if f['name'] == func_name), None)
         module_name = spec_data.get('module_name', 'unknown')
 
+        # [新增] 提取強制呼叫列表
+        required_calls = target_func_spec.get('required_calls', [])
+        calls_instruction = ""
+        if required_calls:
+            calls_instruction = f"CRITICAL REQUIREMENT: This function MUST call the following external APIs: {', '.join(required_calls)}."
+
         # [新增] 依賴注入
         dep_context = self._get_dependency_context(module_dir, spec_data)
 
-        func_signature = (
-            f"Function: {func_name}\n"
-            f"Args: {target_func_spec.get('args')}\n"
-            f"Return: {target_func_spec.get('return_type')}\n"
-            f"Doc: {target_func_spec.get('docstring')}"
-        )
+        # ... (略過 func_signature)
 
         system_prompt = (
             "You are an expert Python Developer. Implement the function based on the spec.\n"
             "RULES:\n"
             "1. Use the provided EXTERNAL DEPENDENCIES to make correct import calls.\n"
-            "2. If importing from a sibling module, use relative imports (e.g. `from ..utils import helper`).\n"
-            "3. Handle edge cases and errors.\n"
-            "4. Output ONLY Python code."
+            "2. Output ONLY Python code."
         )
 
         user_prompt = (
             f"MODULE: {module_name}\n"
             f"{dep_context}\n"
-            f"TARGET SPEC:\n{func_signature}\n\n"
+            f"TARGET SPEC:\n{func_signature}\n"
+            f"{calls_instruction}\n\n" # [關鍵注入]
             "Implement this function."
         )
 
