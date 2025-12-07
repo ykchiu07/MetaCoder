@@ -101,15 +101,17 @@ class MetaCoder:
         """實作指定函式"""
         model = self.model_config["coder"]
 
+        # [修正] 傳入 max_workers=3
         results = self.coder.generateFunctionCode(
             spec_path,
             func_names,
             model,
-            max_workers=2,
-            cancel_event=cancel_event # 傳遞取消旗標
+            max_workers=3, # 您可以根據您的 CPU 核心數調整此值
+            cancel_event=cancel_event
         )
 
-        self.vc.archiveVersion(f"Implemented {len(func_names)} funcs in {os.path.basename(os.path.dirname(spec_path))}")
+        if results: # 只有在有結果時才存檔
+            self.vc.archiveVersion(f"Implemented {len(func_names)} funcs in {os.path.basename(os.path.dirname(spec_path))}")
         return results
 
     # --- 測試生成 ---
@@ -180,20 +182,40 @@ class MetaCoder:
 
     # --- 系統操作 ---
     def get_project_tree(self):
-        """輔助函式：回傳專案結構供 GUI 顯示"""
-        # 如果還沒載入，嘗試自動尋找最新的 architecture.json
-        if not self.current_architecture_path:
-            # 簡單遍歷 workspace 尋找可能的專案檔
-            for root, dirs, files in os.walk(self.workspace_root):
-                if "architecture.json" in files:
-                    self.current_architecture_path = os.path.join(root, "architecture.json")
-                    break
+        """
+        [修正] 更強健的 architecture.json 搜尋邏輯。
+        """
+        # 1. 如果已經有快取路徑且檔案存在，直接用
+        if self.current_architecture_path and os.path.exists(self.current_architecture_path):
+            try:
+                with open(self.current_architecture_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except: pass # 讀取失敗則重搜
 
-        if not self.current_architecture_path or not os.path.exists(self.current_architecture_path):
-            return {}
+        # 2. 搜尋邏輯：優先找根目錄，其次找第一層子目錄
+        candidates = []
+        # Check root
+        p = os.path.join(self.workspace_root, "architecture.json")
+        if os.path.exists(p): candidates.append(p)
 
-        with open(self.current_architecture_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        # Check subdirs (depth=1)
+        if not candidates:
+            for d in os.listdir(self.workspace_root):
+                full_d = os.path.join(self.workspace_root, d)
+                if os.path.isdir(full_d):
+                    p = os.path.join(full_d, "architecture.json")
+                    if os.path.exists(p): candidates.append(p)
+
+        if candidates:
+            self.current_architecture_path = candidates[0] # 取第一個找到的
+            try:
+                with open(self.current_architecture_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[Meta] Error reading arch json: {e}")
+                return {}
+
+        return {}
 
     def get_module_dependencies(self):
         """
@@ -221,25 +243,34 @@ class MetaCoder:
 
     def get_function_distribution(self):
         """
-        [新增] 獲取 '模組 -> 函式列表' 的映射，用於 GUI 繪圖。
-        Returns:
-            dict: { 'module_name': ['func1', 'func2', ...], ... }
+        [修正] 聚合模組名稱，解決 Legend 過於破碎的問題。
+        將 'auth.login', 'auth.utils' 統一聚合為 'auth'。
         """
-        # 確保數據是最新的
         if not self.static_analyzer.graphs:
             self.static_analyzer._preprocess()
 
-        distribution = {}
+        distribution = {} # { 'module_folder_name': [func_names...] }
 
-        # 遍歷 StructureAnalyzer 解析出的所有 ASTGraph
-        for mod_name, graph in self.static_analyzer.graphs.items():
+        for mod_key, graph in self.static_analyzer.graphs.items():
+            # mod_key 可能是 "auth.login" 或 "main"
+            # 我們只取最頂層的模組名稱 (即資料夾名稱)
+            # 如果是 'auth.login' -> top_mod = 'auth'
+            # 如果是 'main' -> top_mod = 'main'
+            top_mod = mod_key.split('.')[0]
+
+            # 排除一些非業務邏輯的根節點 (視情況而定，這裡先保留)
+
             funcs = []
             for _, data in graph.graph.nodes(data=True):
                 if data.get('type') == 'function':
                     funcs.append(data.get('name'))
 
             if funcs:
-                distribution[mod_name] = funcs
+                if top_mod not in distribution:
+                    distribution[top_mod] = []
+                # 合併並去重
+                distribution[top_mod].extend(funcs)
+                # distribution[top_mod] = list(set(distribution[top_mod])) # 若有需要去重
 
         return distribution
 
@@ -265,6 +296,44 @@ class MetaCoder:
         self.get_project_tree()
 
         print("[Meta] Workspace reset complete.")
+
+    def check_dependencies_met(self, module_name: str) -> bool:
+        """
+        [新增] 檢查某模組的依賴是否都已經實作完畢。
+        規則：依賴模組必須至少有一個函式被標記為 implemented。
+        """
+        if not self.current_architecture_path: return True
+
+        try:
+            with open(self.current_architecture_path, 'r') as f:
+                arch = json.load(f)
+
+            mod_info = next((m for m in arch.get('modules', []) if m['name'] == module_name), None)
+            if not mod_info: return True
+
+            project_dir = os.path.dirname(self.current_architecture_path)
+
+            for dep in mod_info.get('dependencies', []):
+                # 檢查依賴模組的 status.json
+                status_path = os.path.join(project_dir, dep, ".status.json")
+                if not os.path.exists(status_path):
+                    print(f"[Dependency Check] {module_name} blocked: Dependency '{dep}' has no status file.")
+                    return False
+
+                # 檢查是否有任何 implemented 的函式
+                with open(status_path, 'r') as f:
+                    status = json.load(f)
+                    # 簡單檢查：只要有任何 key 的 status 是 implemented 就算通過
+                    # 更嚴謹的檢查需要依賴細粒度的 function call graph，這裡先做模組級檢查
+                    if not any(v.get('status') == 'implemented' for v in status.values()):
+                        print(f"[Dependency Check] {module_name} blocked: Dependency '{dep}' has no implemented functions.")
+                        return False
+
+            return True
+
+        except Exception as e:
+            print(f"[Dependency Check] Error: {e}")
+            return True # 出錯時預設不擋，以免死鎖
 
 if __name__ == "__main__":
     app = MetaCoder()

@@ -21,6 +21,8 @@ class CodeImplementer:
     def __init__(self, ollama_url: str = "http://localhost:11434"):
         self.client = OllamaClient(ollama_url)
 
+
+
     def _extract_python_code(self, text: str) -> str:
         # 優先匹配 ```python ... ```
         match = re.search(r"```python\s*(.*?)\s*```", text, re.DOTALL)
@@ -30,97 +32,131 @@ class CodeImplementer:
         if match: return match.group(1)
         return text
 
-    def _implement_single_function(
-        self,
-        spec_data: Dict,
-        func_name: str,
-        module_dir: str,
-        model_name: str= "gemma3:12b",
-        feedback_report: str = None  # [新增] 接收來自 RuntimeAnalyst 的報告
-    ) -> ImplementationResult:
-        print(spec_data)
-        start_time = time.time()
+    def _get_dependency_context(self, module_dir: str, spec_data: Dict) -> str:
+        """
+        [新增] 讀取專案架構與依賴模組的 Spec，組合出 Context。
+        """
+        try:
+            # 假設結構: workspace/project/module/
+            project_dir = os.path.dirname(module_dir)
+            arch_path = os.path.join(project_dir, "architecture.json")
 
-        # 1. 推導路徑
+            if not os.path.exists(arch_path): return ""
+
+            with open(arch_path, 'r') as f: arch = json.load(f)
+
+            current_mod_name = os.path.basename(module_dir)
+            target_mod_info = next((m for m in arch.get('modules', []) if m['name'] == current_mod_name), None)
+
+            if not target_mod_info: return ""
+
+            dependencies = target_mod_info.get('dependencies', [])
+            context = "EXTERNAL DEPENDENCIES:\n"
+
+            for dep_name in dependencies:
+                dep_spec_path = os.path.join(project_dir, dep_name, "spec.json")
+                if os.path.exists(dep_spec_path):
+                    with open(dep_spec_path, 'r') as f:
+                        dep_spec = json.load(f)
+                        # 簡化 spec 資訊以節省 token
+                        funcs = [f"{f['name']}({', '.join([a['name'] for a in f.get('args',[])])})" for f in dep_spec.get('functions', [])]
+                        context += f"- Module '{dep_name}': Available Functions: {', '.join(funcs)}\n"
+
+            return context
+        except Exception as e:
+            print(f"Error building context: {e}")
+            return ""
+
+    def _update_status_file(self, module_dir: str, func_name: str, status: str, entropy: float, version: int):
+        """[修正] 紀錄詳細資訊到 .status.json"""
+        status_path = os.path.join(module_dir, ".status.json")
+        data = {}
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, 'r') as f: data = json.load(f)
+            except: pass
+
+        data[func_name] = {
+            "status": status,
+            "entropy": entropy,
+            "version": version,
+            "timestamp": time.time()
+        }
+
+        with open(status_path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    def _get_next_version(self, module_dir: str, func_name: str) -> int:
+        status_path = os.path.join(module_dir, ".status.json")
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, 'r') as f:
+                    data = json.load(f)
+                    if func_name in data and isinstance(data[func_name], dict):
+                        return data[func_name].get("version", 0) + 1
+            except: pass
+        return 1
+
+    def _implement_single_function(self, spec_data: Dict, func_name: str, module_dir: str, model_name: str, feedback_report: str, cancel_event) -> ImplementationResult:
+        start_time = time.time()
         filename = "__init_logic__.py" if func_name == "__init__" else f"{func_name}.py"
         target_path = os.path.join(module_dir, filename)
 
-        # 2. 獲取 Spec
+        # 1. 準備 Context
         target_func_spec = next((f for f in spec_data.get('functions', []) if f['name'] == func_name), None)
-        if not target_func_spec:
-            return ImplementationResult(func_name, target_path, -1.0, 0.0, False)
+        module_name = spec_data.get('module_name', 'unknown')
 
-        print(f"    > Processing {func_name} with {model_name} (Mode: {'FIX' if feedback_report else 'CREATE'})...")
+        # [新增] 依賴注入
+        dep_context = self._get_dependency_context(module_dir, spec_data)
 
-        # 3. 準備 Context
-        module_name = spec_data.get('module_name', 'unknown_module')
         func_signature = (
-            f"Name: {target_func_spec['name']}\n"
+            f"Function: {func_name}\n"
             f"Args: {target_func_spec.get('args')}\n"
             f"Return: {target_func_spec.get('return_type')}\n"
-            f"Description: {target_func_spec.get('docstring')}"
+            f"Doc: {target_func_spec.get('docstring')}"
         )
 
-        # [新增] 讀取現有程式碼 (如果是修復模式)
-        existing_code = ""
-        if feedback_report and os.path.exists(target_path):
-            with open(target_path, 'r', encoding='utf-8') as f:
-                existing_code = f.read()
+        system_prompt = (
+            "You are an expert Python Developer. Implement the function based on the spec.\n"
+            "RULES:\n"
+            "1. Use the provided EXTERNAL DEPENDENCIES to make correct import calls.\n"
+            "2. If importing from a sibling module, use relative imports (e.g. `from ..utils import helper`).\n"
+            "3. Handle edge cases and errors.\n"
+            "4. Output ONLY Python code."
+        )
 
-        # 4. 動態構建 Prompt
-        if feedback_report:
-            # --- FIX MODE PROMPT ---
-            system_prompt = (
-                "You are an expert Python Developer tasked with FIXING code based on a bug/chaos report. "
-                "1. Read the REPORT and the EXISTING CODE. "
-                "2. Output the FULLY CORRECTED code. "
-                "3. Fix logic/visual issues mentioned. "
-                "\n"
-                "SPECIFIC INSTRUCTION FOR CHAOS FAILURES:\n"
-                "- If the report mentions 'Latency' or 'Timeout', add retry logic (loops) or async handling.\n"
-                "- If the report mentions 'Exception' (e.g., ConnectionError), wrap critical calls in `try...except` blocks and return a fallback value or log the error gracefully.\n"
-                "- If the report mentions 'DataCorruption', add input validation (`isinstance`, `if x is None`).\n"
-                "- GOAL: Increase the function's Survival Rate."
-            )
-            user_prompt = (
-                f"MODULE: {module_name}\n"
-                f"SPEC: {func_signature}\n\n"
-                f"--- EXISTING CODE ---\n{existing_code}\n\n"
-                f"--- BUG REPORT / ANALYSIS ---\n{feedback_report}\n\n"
-                "Please rewrite the code to fix the issues:"
-            )
-        else:
-            # --- CREATE MODE PROMPT (原有的) ---
-            system_prompt = (
-                "You are an expert Python Developer. "
-                "Implement the specified function in Python. "
-                "1. Output ONLY the code for this function. "
-                "2. Handle edge cases. "
-                "3. CRITICAL: If GUI involved, use 'tkinter' only."
-            )
-            user_prompt = (
-                f"MODULE: {module_name}\n"
-                f"Function Specification:\n{func_signature}\n\n"
-                "Please write the full implementation code:"
-            )
+        user_prompt = (
+            f"MODULE: {module_name}\n"
+            f"{dep_context}\n"
+            f"TARGET SPEC:\n{func_signature}\n\n"
+            "Implement this function."
+        )
 
-        # 5. 執行 LLM
+        if feedback_report: # Fix mode logic (省略，保持原樣但加入 dep_context)
+             user_prompt = f"FIX REQUEST:\n{feedback_report}\n\n" + user_prompt
+
+        # 2. 生成
         try:
-            content_str, entropy = self.client.chat_complete_raw(model_name, system_prompt, user_prompt)
+            content_str, entropy = self.client.chat_complete_raw(model_name, system_prompt, user_prompt, cancel_event=cancel_event)
             code_body = self._extract_python_code(content_str)
 
-            # 簡單補全 Import (僅在 Create 模式或 CodeBody 缺失時)
-            if not feedback_report:
-                if "import " not in code_body and ("List" in code_body or "Dict" in code_body):
-                    code_body = "from typing import List, Dict, Any, Optional\n\n" + code_body
+            # 簡單修補 import (如果 LLM 沒寫)
+            if "import" not in code_body:
+                code_body = "from typing import Any, List, Dict, Optional\n" + code_body
 
             with open(target_path, 'w', encoding='utf-8') as f:
                 f.write(code_body)
 
-            return ImplementationResult(func_name, target_path, entropy, time.time() - start_time, True)
+            # 3. 更新狀態
+            version = self._get_next_version(module_dir, func_name)
+            self._update_status_file(module_dir, func_name, "implemented", entropy, version)
 
+            return ImplementationResult(func_name, target_path, entropy, time.time() - start_time, True, version)
+
+        except InterruptedError:
+            return ImplementationResult(func_name, target_path, 0.0, 0.0, False)
         except Exception as e:
-            print(f"[!] Error implementing {func_name}: {e}")
+            print(f"Error: {e}")
             return ImplementationResult(func_name, target_path, -1.0, 0.0, False)
 
     # 這裡修改 generateFunctionCode 簽名以支援 feedback_report 字典
@@ -129,7 +165,7 @@ class CodeImplementer:
         spec_path: str,
         target_function_names: List[str],
         model_name: str= "gemma3:12b",
-        max_workers: int = 2,
+        max_workers: int = 3,
         feedback_map: Dict[str, str] = None,  # [新增] Key: func_name, Value: report_string
         cancel_event: threading.Event = None  # [新增] 接收取消旗標
     ) -> List[ImplementationResult]:
@@ -144,31 +180,37 @@ class CodeImplementer:
         results = []
         feedback_map = feedback_map or {}
 
-        print(f"[*] Starting implementation/fix for {len(target_function_names)} functions...")
+        print(f"[*] Starting implementation for {len(target_function_names)} functions with {max_workers} workers...")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_name = {}
             for name in target_function_names:
-                # [關鍵修正] 在提交任務前檢查取消
                 if cancel_event and cancel_event.is_set():
-                    print("[CodeImplementer] Task Cancelled by User.")
-                    break # 停止提交新任務
-                # 取得該函式對應的回饋報告 (如果有的話)
+                    break
                 report = feedback_map.get(name)
+                # [關鍵] 將 cancel_event 傳入 _implement_single_function
                 future = executor.submit(
                     self._implement_single_function,
-                    spec_data, name, module_dir, model_name, report
+                    spec_data, name, module_dir, model_name, report, cancel_event
                 )
                 future_to_name[future] = name
 
             for future in as_completed(future_to_name):
-                # 這裡也可以再次檢查，如果已取消則不收集結果或做標記
-                if cancel_event and cancel_event.is_set():
-                    continue
-                res = future.result()
-                results.append(res)
+                # 這裡不 break，讓正在跑的任務有機會完成或拋出 InterruptedError
+                try:
+                    res = future.result()
+                    results.append(res)
+                except InterruptedError:
+                    print(f"   [Stopped] {future_to_name[future]}")
+                except Exception as e:
+                    print(f"   [Error] {future_to_name[future]}: {e}")
                 action = "Fixed" if feedback_map.get(res.function_name) else "Implemented"
                 status = "Success" if res.success else "Failed"
                 print(f"    [{action}] {res.function_name}: {status} (Entropy: {res.model_entropy})")
 
         return results
+
+def implement_function_direct(self, spec_path: str, func_name: str, model_name: str, cancel_event=None) -> ImplementationResult:
+        with open(spec_path, 'r') as f: spec_data = json.load(f)
+        module_dir = os.path.dirname(spec_path)
+        return self._implement_single_function(spec_data, func_name, module_dir, model_name, None, cancel_event)

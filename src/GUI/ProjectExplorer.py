@@ -8,34 +8,144 @@ class ProjectExplorer:
     def __init__(self, parent, mediator):
         self.mediator = mediator
         self.meta = mediator.meta
-
-        # 監控狀態
         self._last_snapshot = {}
-        self._monitor_active = True
         self._is_refreshing = False
 
-        self.frame = ttk.LabelFrame(parent, text="Project Explorer (Debug Mode)")
+        # Loading 動畫相關
+        self._loading_items = set() # 存放正在生成的 item ID
+        self._spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_idx = 0
 
-        # 啟用多選模式
+        self.frame = ttk.LabelFrame(parent, text="Project Explorer")
+
         self.tree = ttk.Treeview(self.frame, selectmode="extended")
         self.tree.pack(fill=tk.BOTH, expand=True)
 
-        # 綁定事件
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Button-3>", self.show_context_menu)
-
-        self._init_menu()
-
-        print(f"[DEBUG {self._now()}] Init complete. Starting monitor loop in 1s...")
-        # 啟動自動監控
-        self.frame.after(1000, self._monitor_loop)
-        # [新增] 綁定全域點擊事件以關閉選單
-        # 當使用者點擊 Treeview 任何地方時，嘗試關閉選單
         self.tree.bind("<Button-1>", self._on_tree_click)
 
-    def _now(self):
-        """取得當前時間字串，方便除錯"""
-        return datetime.datetime.now().strftime("%H:%M:%S")
+        self._init_menu()
+        self.frame.after(1000, self._monitor_loop)
+
+        # 啟動動畫迴圈
+        self._animate_loading()
+
+    def _animate_loading(self):
+        """處理旋轉動畫"""
+        if self._loading_items:
+            char = self._spinner_chars[self._spinner_idx]
+            self._spinner_idx = (self._spinner_idx + 1) % len(self._spinner_chars)
+
+            # 對於需要移除的 item (可能任務已結束但尚未刷新)，做個清理
+            to_remove = []
+            for item_id in self._loading_items:
+                if not self.tree.exists(item_id):
+                    to_remove.append(item_id)
+                    continue
+
+                # 更新文字，加上 spinner
+                # 我們需要保留原始文字...這有點麻煩，簡單做法是 tag 識別
+                current_text = self.tree.item(item_id, "text")
+                # 如果已經有 spinner，替換掉
+                # 假設 spinner 加在最後 "func_name  ⠋"
+                clean_text = current_text.split("  ")[0]
+                self.tree.item(item_id, text=f"{clean_text}  {char}")
+
+            for i in to_remove:
+                self._loading_items.discard(i)
+
+        self.frame.after(100, self._animate_loading)
+
+    def set_item_loading(self, func_name, is_loading):
+        """
+        [API] 設定某個函式的 Loading 狀態
+        需要遍歷 Tree 找到對應的 func_name item... 這效能較差，
+        但考慮到樹不大，暫時可行。
+        """
+        for item_id in self.tree.get_children(): # Project
+            for mod_id in self.tree.get_children(item_id): # Module
+                for func_id in self.tree.get_children(mod_id): # Function
+                    text = self.tree.item(func_id, "text").split("  ")[0]
+                    # 移除可能的 ✔ 標記
+                    text = text.replace(" ✔", "")
+
+                    if text == func_name:
+                        if is_loading:
+                            self._loading_items.add(func_id)
+                        else:
+                            self._loading_items.discard(func_id)
+                            # 恢復原狀 (刷新時會自動加上勾勾，這裡先重置)
+                            self.tree.item(func_id, text=text)
+                        return
+
+    def _get_status_map(self, mod_dir):
+        """讀取該模組的 .status.json"""
+        status_path = os.path.join(mod_dir, ".status.json")
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, 'r') as f:
+                    return json.load(f)
+            except: pass
+        return {}
+
+    def refresh_tree(self):
+        if self._is_refreshing: return
+        self._is_refreshing = True
+        try:
+            expanded_nodes = self._save_expanded_state()
+            # 清空時也要清空 loading set，避免 ID 參照錯誤
+            self._loading_items.clear()
+            self.tree.delete(*self.tree.get_children())
+
+            data = self.meta.get_project_tree()
+            if not data: return
+
+            proj_name = data.get('project_name', 'Project')
+            root = self.tree.insert("", "end", text=proj_name, open=True, values=("project",))
+
+            # 推斷專案根目錄
+            if self.meta.current_architecture_path:
+                project_base_dir = os.path.dirname(self.meta.current_architecture_path)
+            else:
+                project_base_dir = self.meta.workspace_root
+
+            modules = data.get('modules', [])
+            for mod in modules:
+                mod_name = mod['name']
+                mod_node = self.tree.insert(root, "end", text=mod_name, open=False, values=("module",))
+
+                mod_dir = os.path.join(project_base_dir, mod_name)
+                spec_path = os.path.join(mod_dir, "spec.json")
+
+                if os.path.exists(spec_path):
+                    self.tree.item(mod_node, values=("module", spec_path))
+
+                    # [新增] 讀取狀態檔
+                    status_map = self._get_status_map(mod_dir)
+
+                    try:
+                        with open(spec_path, 'r', encoding='utf-8') as f:
+                            spec = json.load(f)
+
+                        for func in spec.get('functions', []):
+                            fname = func['name']
+                            display_text = fname
+
+                            # [新增] 檢查狀態並打勾
+                            if status_map.get(fname) == "implemented":
+                                display_text += " ✔"
+
+                            self.tree.insert(mod_node, "end", text=display_text, values=("function", spec_path))
+                    except Exception as e:
+                        print(f"[Explorer] Spec load error: {e}")
+
+            self._restore_expanded_state(expanded_nodes)
+        finally:
+            self._is_refreshing = False
+
+    # ... 其他 helper methods (_init_menu, on_select, context menu 等) 保持原樣 ...
+    # 這裡省略以節省篇幅，請保留原本的代碼
 
     def _init_menu(self):
         self.menu = tk.Menu(self.frame, tearoff=0)
@@ -44,88 +154,35 @@ class ProjectExplorer:
         self.menu.add_separator()
         self.menu.add_command(label="Show Architecture JSON", command=self.show_arch_json)
 
-    def _get_snapshot(self):
-        """建立檔案系統指紋"""
-        snapshot = {}
-        root_path = self.meta.workspace_root
+    def _on_tree_click(self, event):
+        try: self.menu.unpost()
+        except: pass
 
-        # DEBUG: 檢查路徑是否有效
-        if not root_path:
-            # print(f"[DEBUG {self._now()}] Snapshot: workspace_root is None or Empty.") # 太吵，先註解
-            return snapshot
-
-        if not os.path.exists(root_path):
-            print(f"[DEBUG {self._now()}] Snapshot: Path does not exist on disk: {root_path}")
-            return snapshot
-
-        # 監控 Architecture JSON
-        if self.meta.current_architecture_path and os.path.exists(self.meta.current_architecture_path):
-            try:
-                snapshot['arch.json'] = os.path.getmtime(self.meta.current_architecture_path)
-            except OSError:
-                pass
-
-        # 監控專案資料夾
-        try:
-            file_count = 0
-            for root, dirs, files in os.walk(root_path):
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d != "__pycache__"]
-                for file in files:
-                    if file.endswith('.py') or file.endswith('.json'):
-                        full_path = os.path.join(root, file)
-                        try:
-                            rel_path = os.path.relpath(full_path, root_path)
-                            snapshot[rel_path] = os.path.getmtime(full_path)
-                            file_count += 1
-                        except OSError:
-                            pass
-            # print(f"[DEBUG {self._now()}] Snapshot scan finished. Files tracked: {file_count}")
-        except Exception as e:
-            print(f"[DEBUG {self._now()}] Snapshot Error: {e}")
-
-        return snapshot
+    def show_context_menu(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            if item not in self.tree.selection(): self.tree.selection_set(item)
+            self.tree.focus_set()
+            self.menu.post(event.x_root, event.y_root)
 
     def set_workspace(self, path):
         self._last_snapshot = {}
-        # 強制清空樹狀圖，給使用者「正在重新載入」的視覺回饋
         self.tree.delete(*self.tree.get_children())
         self.frame.after_idle(self.refresh_tree)
 
     def _monitor_loop(self):
-        """除錯版監控迴圈 (已修正初次載入不顯示的問題)"""
-        if not self.frame.winfo_exists():
-            return
-
-        interval = 2000
-
+        if not self.frame.winfo_exists(): return
         try:
-            if not self.meta.workspace_root:
-                # 暫時沒 Workspace，安靜等待
-                pass
-            else:
-                current_snapshot = self._get_snapshot()
-
-                # 分支 4: 狀態比對
-                if not self._last_snapshot:
-                    print(f"[DEBUG {self._now()}] Monitor Loop: First run / Workspace Changed. Found {len(current_snapshot)} files.")
-                    self._last_snapshot = current_snapshot
-
-                    # === [修正點] ===
-                    # 第一次抓到檔案時，必須立刻刷新畫面！
+            if self.meta.workspace_root:
+                snap = 0
+                if self.meta.current_architecture_path and os.path.exists(self.meta.current_architecture_path):
+                     snap = os.path.getmtime(self.meta.current_architecture_path)
+                # 這裡可以加入對 .status.json 的監控，但為了效能，我們依賴操作觸發刷新
+                if snap != self._last_snapshot.get('arch', 0):
+                    self._last_snapshot['arch'] = snap
                     self.frame.after_idle(self.refresh_tree)
-
-                elif current_snapshot != self._last_snapshot:
-                    print(f"[DEBUG {self._now()}] Monitor Loop: !!! CHANGE DETECTED !!!")
-                    self._last_snapshot = current_snapshot
-                    self.frame.after_idle(self.refresh_tree)
-
-        except Exception as e:
-            print(f"[DEBUG {self._now()}] !!! Monitor Loop CRASHED !!! Error: {e}")
-            interval = 5000
-
-        self.frame.after(interval, self._monitor_loop)
-
-    # --- 狀態保留與刷新邏輯 ---
+        except: pass
+        self.frame.after(2000, self._monitor_loop)
 
     def _save_expanded_state(self):
         expanded = set()
@@ -142,123 +199,47 @@ class ProjectExplorer:
             if "root_project" in expanded_set:
                 self.tree.item(child, open=True)
             for grand_child in self.tree.get_children(child):
-                if self.tree.item(grand_child, 'text') in expanded_set:
+                # 因為文字可能加上了 ✔，所以我們要比對原始名稱
+                item_text = self.tree.item(grand_child, 'text').split(" ")[0]
+                if item_text in expanded_set:
                     self.tree.item(grand_child, open=True)
 
-    def refresh_tree(self):
-        print(f"[DEBUG {self._now()}] Action: Refreshing TreeView...")
-        if self._is_refreshing:
-            print(f"[DEBUG {self._now()}] Skipped refresh (already in progress).")
-            return
-        self._is_refreshing = True
-
-        try:
-            expanded_nodes = self._save_expanded_state()
-            self.tree.delete(*self.tree.get_children())
-
-            data = self.meta.get_project_tree()
-            if not data:
-                print(f"[DEBUG {self._now()}] Refresh: No project data found from meta.")
-                return
-
-            root = self.tree.insert("", "end", text=data.get('project_name', 'Project'), open=True, values=("project",))
-
-            # 顯示模組與函式
-            modules = data.get('modules', [])
-            print(f"[DEBUG {self._now()}] Refresh: Rendering {len(modules)} modules.")
-
-            for mod in modules:
-                mod_node = self.tree.insert(root, "end", text=mod['name'], open=False, values=("module",))
-
-                proj_name = data.get('project_name', 'vibe_project').replace(" ", "_")
-                spec_path = os.path.join(self.meta.workspace_root, proj_name, mod['name'], "spec.json")
-
-                if os.path.exists(spec_path):
-                    self.tree.item(mod_node, values=("module", spec_path))
-                    try:
-                        with open(spec_path, 'r', encoding='utf-8') as f:
-                            spec = json.load(f)
-                            for func in spec.get('functions', []):
-                                self.tree.insert(mod_node, "end", text=func['name'], values=("function", spec_path))
-                    except Exception as e:
-                        print(f"[DEBUG] Error reading spec {spec_path}: {e}")
-
-            self._restore_expanded_state(expanded_nodes)
-            print(f"[DEBUG {self._now()}] Refresh Complete.")
-
-        except Exception as e:
-            print(f"[DEBUG {self._now()}] Refresh Tree Error: {e}")
-        finally:
-            self._is_refreshing = False
-
-    def _on_tree_click(self, event):
-        """點擊樹狀圖時，確保選單消失"""
-        # unpost 在某些系統上可能無效，標準做法是利用 focus 轉移或再次點擊
-        # 但在 Tkinter 中，menu.unpost() 通常能解決懸浮問題
-        try:
-            self.menu.unpost()
-        except:
-            pass
-
-    # --- 下方邏輯保持不變 ---
     def on_select(self, event):
         selected_items = self.tree.selection()
         if not selected_items: return
-
         item = selected_items[0]
         values = self.tree.item(item, "values")
-        text = self.tree.item(item, "text")
-
+        text = self.tree.item(item, "text").split(" ")[0] # 去除勾勾或 spinner
         if not values: return
         item_type = values[0]
+        file_path = None
         content_to_show = ""
-
+        title = text
         if item_type == "function":
             spec_path = values[1]
             mod_dir = os.path.dirname(spec_path)
             fname = "__init_logic__.py" if text == "__init__" else f"{text}.py"
-            code_path = os.path.join(mod_dir, fname)
-            if os.path.exists(code_path):
-                with open(code_path, 'r', encoding='utf-8') as f:
-                    content_to_show = f.read()
-            else:
-                content_to_show = "# Source code not found. Please implement first."
-
+            file_path = os.path.join(mod_dir, fname)
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f: content_to_show = f.read()
+            else: content_to_show = "# Source code not found."
         elif item_type == "module":
             if len(values) > 1:
                 spec_path = values[1]
+                file_path = spec_path
                 if os.path.exists(spec_path):
-                    with open(spec_path, 'r', encoding='utf-8') as f:
-                        content_to_show = json.dumps(json.load(f), indent=4, ensure_ascii=False)
-                else:
-                    content_to_show = "// Spec not found. Run 'Refine Module' first."
-            else:
-                content_to_show = "// Spec not found. Run 'Refine Module' first."
-
+                    with open(spec_path, 'r', encoding='utf-8') as f: content_to_show = json.dumps(json.load(f), indent=4, ensure_ascii=False)
         elif item_type == "project":
-            if self.meta.current_architecture_path and os.path.exists(self.meta.current_architecture_path):
-                with open(self.meta.current_architecture_path, 'r', encoding='utf-8') as f:
-                    content_to_show = json.dumps(json.load(f), indent=4, ensure_ascii=False)
-
-        if content_to_show:
-            self.mediator.workspace.code_editor.delete("1.0", tk.END)
-            self.mediator.workspace.code_editor.insert(tk.END, content_to_show)
-
-    def show_context_menu(self, event):
-        item = self.tree.identify_row(event.y)
-        if item:
-            if item not in self.tree.selection():
-                self.tree.selection_set(item)
-            # post 之前先確保 tree 獲得焦點
-            self.tree.focus_set()
-            self.menu.post(event.x_root, event.y_root)
+            if self.meta.current_architecture_path:
+                file_path = self.meta.current_architecture_path
+                with open(file_path, 'r', encoding='utf-8') as f: content_to_show = json.dumps(json.load(f), indent=4, ensure_ascii=False)
+        if content_to_show: self.mediator.workspace.open_file(title, content_to_show, file_path)
 
     def show_arch_json(self):
         if self.meta.current_architecture_path:
             with open(self.meta.current_architecture_path, 'r') as f:
                 content = json.dumps(json.load(f), indent=4)
-                self.mediator.workspace.code_editor.delete("1.0", tk.END)
-                self.mediator.workspace.code_editor.insert(tk.END, content)
+                self.mediator.workspace.open_file("architecture.json", content, self.meta.current_architecture_path)
 
     def on_refine(self):
         items = self.tree.selection()
@@ -267,53 +248,88 @@ class ProjectExplorer:
             vals = self.tree.item(item, "values")
             if vals and vals[0] == "module":
                 target_modules.append(self.tree.item(item, "text"))
-
-        if not target_modules:
-            self.mediator.log("[UI] No modules selected for refinement.")
-            return
-
+        if not target_modules: return
         def task():
-            self.mediator.log(f"Batch Refining: {target_modules}")
             for mod in target_modules:
-                if self.mediator._current_cancel_flag.is_set():
-                    break
-                self.mediator.log(f"Processing {mod}...")
-                self.meta.refine_module(mod, cancel_event=self.mediator._current_cancel_flag)
-
+                if self.mediator._current_cancel_flag.is_set(): break
+                self.mediator.meta.refine_module(mod, cancel_event=self.mediator._current_cancel_flag)
             self.frame.after(0, self.refresh_tree)
-
         self.mediator.run_async(task)
 
     def on_implement(self):
         items = self.tree.selection()
+        # tasks 結構: { (mod_name, spec_path): [func_name1, func_name2] }
         tasks = {}
 
         for item in items:
             vals = self.tree.item(item, "values")
             if vals and vals[0] == "function":
-                fname = self.tree.item(item, "text")
+                # 去除狀態符號
+                raw_text = self.tree.item(item, "text")
+                fname = raw_text.split(" ")[0]
+
+                # 如果已經實作過 (有 ✔)，詢問是否重新實作？(這裡簡化：直接允許)
+
                 spec_path = vals[1]
-                if spec_path not in tasks:
-                    tasks[spec_path] = []
-                tasks[spec_path].append(fname)
+                # 獲取模組名稱 (上一層節點的 text)
+                parent_id = self.tree.parent(item)
+                mod_name = self.tree.item(parent_id, "text")
 
-        if not tasks:
-            self.mediator.log("[UI] No functions selected for implementation.")
-            return
+                key = (mod_name, spec_path)
+                if key not in tasks: tasks[key] = []
+                tasks[key].append(fname)
 
-        def task():
-            total_funcs = sum(len(fs) for fs in tasks.values())
-            self.mediator.log(f"Batch Implementing {total_funcs} functions...")
+        if not tasks: return
 
-            for spec_path, funcs in tasks.items():
-                if self.mediator._current_cancel_flag.is_set(): break
-                mod_name = os.path.basename(os.path.dirname(spec_path))
-                self.mediator.log(f"Implementing in {mod_name}: {funcs}")
-                self.meta.implement_functions(
-                    spec_path, funcs, cancel_event=self.mediator._current_cancel_flag
-                )
+        # 1. 檢查依賴 & 排程
+        for (mod_name, spec_path), funcs in tasks.items():
 
-            self.mediator.log("Batch Implementation Finished.")
-            self.frame.after(0, self.refresh_tree)
+            # [依賴鎖定]
+            if not self.meta.check_dependencies_met(mod_name):
+                self.mediator.log(f"[Blocked] Cannot implement {mod_name}: Dependencies not met.")
+                # 這裡可以彈窗警告
+                continue
 
-        self.mediator.run_async(task)
+            # 2. 為每個函式建立獨立任務
+            for func in funcs:
+                self.set_item_loading(func, True) # 開始旋轉
+
+                # 使用 closure 捕捉變數
+                def make_task(s_path, f_name, m_name):
+                    def task_func():
+                        self.mediator.log(f"Implementing {f_name} in {m_name}...")
+                        result = self.meta.coder.implement_function_direct(
+                            s_path, f_name,
+                            self.meta.model_config['coder'],
+                            cancel_event=self.mediator._current_cancel_flag
+                        )
+                        return result
+
+                    def success_cb():
+                        # 停止旋轉，刷新樹狀圖 (會自動變為 ✔)
+                        self.set_item_loading(f_name, False)
+                        self.refresh_tree() # 刷新以讀取 .status.json 更新 UI
+
+                        # [新增] 自動在編輯器開啟
+                        mod_dir = os.path.dirname(s_path)
+                        code_path = os.path.join(mod_dir, "__init_logic__.py" if f_name == "__init__" else f"{f_name}.py")
+                        if os.path.exists(code_path):
+                            with open(code_path, 'r', encoding='utf-8') as f:
+                                code = f.read()
+                            self.mediator.workspace.open_file(f_name, code, code_path)
+
+                        # [新增] 顯示詳細資訊到 Intelligence Panel
+                        # 我們需要讀取最新的 status 來獲取 entropy
+                        status_path = os.path.join(mod_dir, ".status.json")
+                        try:
+                            with open(status_path, 'r') as f: st = json.load(f)
+                            info = st.get(f_name, {})
+                            self.mediator.log(f"[Success] {f_name} v{info.get('version')} (Entropy: {info.get('entropy')})")
+                        except: pass
+
+                    return task_func, success_cb
+
+                t_func, s_cb = make_task(spec_path, func, mod_name)
+
+                # 加入 MainWindow 的 Queue
+                self.mediator.run_async(t_func, success_callback=s_cb)

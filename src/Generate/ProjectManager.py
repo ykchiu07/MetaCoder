@@ -34,16 +34,23 @@ class ProjectManager:
 
         system_prompt = (
             "You are an expert Python Software Architect. "
-            "Break down the user's requirement into a high-level modular architecture. "
-            "Output strict JSON. Format: "
+            "Design a modular architecture based on the user's requirements. "
+            "\n\n"
+            "CRITICAL REQUIREMENTS:\n"
+            "1. Define a clear entry point (e.g., 'main.py' or 'app.py') that orchestrates the modules.\n"
+            "2. Define strict dependencies. If Module A imports Module B, Module A depends on B.\n"
+            "3. Avoid circular dependencies.\n"
+            "\n"
+            "Output strict JSON:\n"
             "{\n"
             "  'project_name': 'str',\n"
+            "  'entry_point': 'main.py',\n"  # 新增
             "  'modules': [\n"
             "    {\n"
-            "      'name': 'module_name',\n"
-            "      'description': 'Brief responsibility',\n"
-            "      'dependencies': ['dep1', 'dep2'],\n"
-            "      'public_api_summary': ['func1', 'func2']\n"
+            "      'name': 'auth',\n"
+            "      'description': 'Handles user login/register',\n"
+            "      'dependencies': ['database', 'utils'],\n" # 強制填寫
+            "      'public_api_summary': ['login(user, pass)', 'logout()']\n"
             "    }\n"
             "  ]\n"
             "}"
@@ -75,6 +82,14 @@ class ProjectManager:
         with open(architecture_path, 'r', encoding='utf-8') as f:
             arch_data = json.load(f)
 
+        # [新增] 構建全域依賴上下文 (讓模組知道別的模組有哪些 API 可用)
+        other_modules_context = ""
+        for m in arch_data.get('modules', []):
+            if m['name'] != target_module_name:
+                other_modules_context += f"- Module '{m['name']}': {m.get('description')}. APIs: {m.get('public_api_summary')}\n"
+
+        target_mod_info = next((m for m in arch_data.get('modules', []) if m['name'] == target_module_name), None)
+
         project_dir = os.path.dirname(architecture_path)
         mod_dir = os.path.join(project_dir, target_module_name)
         if not os.path.exists(mod_dir): os.makedirs(mod_dir)
@@ -94,8 +109,12 @@ class ProjectManager:
 
         # --- 優化後的 Prompt ---
         system_prompt = (
-            "You are a Senior Python Developer. "
-            "Define the detailed specification for this module. "
+            "You are a Senior Python Developer. Define the detailed specification for a module.\n"
+            # ... (保留原有的參數要求) ...
+            "CONTEXT AWARENESS:\n"
+            f"Here are other modules you can import and use:\n{other_modules_context}\n"
+            "If this module depends on them, use their APIs in your function signatures or logic descriptions.\n"
+            "\n"
             "The module will be implemented as a Class. "
             "\n\n"
             "CRITICAL INSTRUCTION ON PARAMETERS:\n"
