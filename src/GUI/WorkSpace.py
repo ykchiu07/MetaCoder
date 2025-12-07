@@ -52,6 +52,21 @@ class WorkSpace:
         self.selected_node = None
         self._init_graph_menu()
 
+        # --- Tab 2: Dependency Graph ---
+        self.graph_frame = ttk.Frame(self.notebook) # 包裝 Canvas 和控制列
+        self.notebook.add(self.graph_frame, text="Dependency Graph")
+
+        # 控制列
+        self.graph_toolbar = tk.Frame(self.graph_frame, bg=self.colors['bg'])
+        self.graph_toolbar.pack(fill=tk.X, side=tk.TOP)
+
+        self.view_mode = tk.StringVar(value="function")
+        ttk.Radiobutton(self.graph_toolbar, text="Function View", value="function", variable=self.view_mode, command=self.draw_dependency_graph).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(self.graph_toolbar, text="Module View", value="module", variable=self.view_mode, command=self.draw_dependency_graph).pack(side=tk.LEFT, padx=5)
+
+        self.canvas = tk.Canvas(self.graph_frame, bg=self.colors['editor_bg'], highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
     def _init_graph_menu(self):
         self.graph_menu = tk.Menu(self.canvas, tearoff=0)
         self.graph_menu.add_command(label="Refine Module", command=self.on_graph_refine)
@@ -162,45 +177,84 @@ class WorkSpace:
             return '#%02x%02x%02x' % comp
         except: return "white"
 
-    def draw_dependency_graph(self):
+    def draw_module_view(self):
         self.canvas.delete("all")
         self._hit_areas = []
-        data = self.mediator.meta.get_function_distribution()
-        if not data:
-            self.canvas.create_text(400, 300, text="No data.", fill="#666", font=("Arial", 14))
+
+        nodes, edges = self.mediator.meta.get_module_dependencies()
+        if not nodes:
+            self.canvas.create_text(400, 300, text="No module data.", fill="#666")
             return
 
-        modules = list(data.keys())
-        colors = self._generate_colors(len(modules))
-        mod_color_map = {mod: col for mod, col in zip(modules, colors)}
-
+        # 圓形佈局
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
-        if width < 100: width = 800
-        if height < 100: height = 600
         center_x, center_y = width / 2, height / 2
-        max_radius = min(width, height) / 2 - 50
-        total_modules = len(modules)
-        angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
+        radius = min(width, height) / 3
 
-        for i, mod in enumerate(modules):
-            funcs = data[mod]
-            start_angle = i * angle_per_mod
-            color = mod_color_map[mod]
-            for j, func in enumerate(funcs):
-                random.seed(hash(mod + func))
-                theta = start_angle + (angle_per_mod * random.random())
-                r = max_radius * (0.3 + 0.6 * random.random())
-                x = center_x + r * math.cos(theta)
-                y = center_y + r * math.sin(theta)
-                node_r = 10
-                if self.selected_node == (func, mod):
-                    contrast = self._get_contrast_color(color)
-                    self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline=contrast, width=3)
-                self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=color, outline="white", width=1)
-                self.canvas.create_text(x, y + 18, text=func, fill="#ccc", font=("Consolas", 8))
-                self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, func, mod, color))
-        self._draw_legend(width, height, modules, mod_color_map)
+        angle_step = 2 * math.pi / len(nodes)
+        node_pos = {}
+
+        # Draw Nodes
+        for i, node in enumerate(nodes):
+            angle = i * angle_step
+            x = center_x + radius * math.cos(angle)
+            y = center_y + radius * math.sin(angle)
+            node_pos[node] = (x, y)
+
+            # 模組圓圈比較大
+            self.canvas.create_oval(x-30, y-30, x+30, y+30, fill="#4a88c7", outline="white", width=2)
+            self.canvas.create_text(x, y, text=node, fill="white", font=("Arial", 10, "bold"))
+
+        # Draw Edges
+        for u, v in edges:
+            if u in node_pos and v in node_pos:
+                x1, y1 = node_pos[u]
+                x2, y2 = node_pos[v]
+                self.canvas.create_line(x1, y1, x2, y2, arrow=tk.LAST, fill="#888", width=2)
+
+    def draw_dependency_graph(self):
+        if self.view_mode.get() == "module":
+            self.draw_module_view()
+        else:
+            self.canvas.delete("all")
+            self._hit_areas = []
+            data = self.mediator.meta.get_function_distribution()
+            if not data:
+                self.canvas.create_text(400, 300, text="No data.", fill="#666", font=("Arial", 14))
+                return
+
+            modules = list(data.keys())
+            colors = self._generate_colors(len(modules))
+            mod_color_map = {mod: col for mod, col in zip(modules, colors)}
+
+            width = self.canvas.winfo_width()
+            height = self.canvas.winfo_height()
+            if width < 100: width = 800
+            if height < 100: height = 600
+            center_x, center_y = width / 2, height / 2
+            max_radius = min(width, height) / 2 - 50
+            total_modules = len(modules)
+            angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
+
+            for i, mod in enumerate(modules):
+                funcs = data[mod]
+                start_angle = i * angle_per_mod
+                color = mod_color_map[mod]
+                for j, func in enumerate(funcs):
+                    random.seed(hash(mod + func))
+                    theta = start_angle + (angle_per_mod * random.random())
+                    r = max_radius * (0.3 + 0.6 * random.random())
+                    x = center_x + r * math.cos(theta)
+                    y = center_y + r * math.sin(theta)
+                    node_r = 10
+                    if self.selected_node == (func, mod):
+                        contrast = self._get_contrast_color(color)
+                        self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline=contrast, width=3)
+                    self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=color, outline="white", width=1)
+                    self.canvas.create_text(x, y + 18, text=func, fill="#ccc", font=("Consolas", 8))
+                    self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, func, mod, color))
+            self._draw_legend(width, height, modules, mod_color_map)
 
     def _draw_legend(self, w, h, modules, color_map):
         legend_x = w - 200

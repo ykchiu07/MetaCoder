@@ -82,14 +82,7 @@ class ProjectManager:
         with open(architecture_path, 'r', encoding='utf-8') as f:
             arch_data = json.load(f)
 
-        # [新增] 構建全域依賴上下文 (讓模組知道別的模組有哪些 API 可用)
-        other_modules_context = ""
-        for m in arch_data.get('modules', []):
-            if m['name'] != target_module_name:
-                other_modules_context += f"- Module '{m['name']}': {m.get('description')}. APIs: {m.get('public_api_summary')}\n"
-
-        target_mod_info = next((m for m in arch_data.get('modules', []) if m['name'] == target_module_name), None)
-
+        # [Fix 4] 提前定義 mod_dir
         project_dir = os.path.dirname(architecture_path)
         mod_dir = os.path.join(project_dir, target_module_name)
         if not os.path.exists(mod_dir): os.makedirs(mod_dir)
@@ -97,52 +90,52 @@ class ProjectManager:
         target_mod_info = next((m for m in arch_data.get('modules', []) if m['name'] == target_module_name), None)
         if not target_mod_info: raise ValueError(f"Module '{target_module_name}' not found.")
 
-        progress_data['status'] = f"Generating spec for {target_module_name}..."
+        declared_deps = target_mod_info.get('dependencies', [])
 
-        context_str = (
-            f"Project: {arch_data.get('project_name')}\n"
-            f"Module: {target_module_name}\n"
-            f"Description: {target_mod_info.get('description')}\n"
-            f"Dependencies: {target_mod_info.get('dependencies')}\n"
-            f"Suggested APIs: {target_mod_info.get('public_api_summary')}"
-        )
+        # 構建 Context：只提供「被依賴模組」的詳細資訊
+        dep_context = "DEPENDENCY CONTEXT (You can use these APIs):\n"
+        project_dir = os.path.dirname(architecture_path)
 
-        # --- 優化後的 Prompt ---
+        for dep in declared_deps:
+            dep_spec_path = os.path.join(project_dir, dep, "spec.json")
+            if os.path.exists(dep_spec_path):
+                with open(dep_spec_path, 'r') as f:
+                    spec = json.load(f)
+                    # 簡化 API 描述
+                    funcs = [f"{fn['name']}(...)" for fn in spec.get('functions', [])]
+                    dep_context += f"- Module '{dep}': {spec.get('description')}\n  Available: {', '.join(funcs)}\n"
+            else:
+                dep_context += f"- Module '{dep}': (Spec not generated yet)\n"
+
         system_prompt = (
             "You are a Senior Python Developer. Define the detailed specification for a module.\n"
-            # ... (保留原有的參數要求) ...
-            "CONTEXT AWARENESS:\n"
-            f"Here are other modules you can import and use:\n{other_modules_context}\n"
-            "If this module depends on them, use their APIs in your function signatures or logic descriptions.\n"
             "\n"
-            "The module will be implemented as a Class. "
-            "\n\n"
-            "CRITICAL INSTRUCTION ON PARAMETERS:\n"
-            "1. Do NOT rely on hardcoded strings inside functions. Everything dynamic must be an argument.\n"
-            "2. Do NOT abstract away necessary data. If an API key or Database connection is needed, it must be passed in `__init__` or the method itself.\n"
-            "3. Be explicit about types (e.g., 'url: str', 'timeout: int', 'api_key: str').\n"
+            "CRITICAL RULES FOR DEPENDENCIES:\n"
+            f"1. This module is architected to depend on: {json.dumps(declared_deps)}.\n"
+            "2. You MUST include a 'dependencies' field in the output JSON matching this list.\n"
+            "3. In the 'docstring' of each function, explicitly state which external functions it calls (e.g., 'Calls auth.login').\n"
             "\n"
-            "Output strict JSON. Format:\n"
+            "Output strict JSON:\n"
             "{\n"
             "  'module_name': 'str',\n"
-            "  'class_name': 'str (CamelCase)',\n"
+            "  'dependencies': ['mod_a', 'mod_b'],\n" # 強制欄位
             "  'functions': [\n"
             "    {\n"
-            "      'name': '__init__',\n"
-            "      'access': 'public',\n"
-            "      'args': [{'name': 'config', 'type': 'dict'}, {'name': 'base_url', 'type': 'str'}],\n"
-            "      'return_type': 'None',\n"
-            "      'docstring': 'Initializes with config and base_url...'\n"
-            "    },\n"
-            "    {\n"
-            "      'name': 'fetch_stock_data',\n"
-            "      'access': 'public',\n"
-            "      'args': [{'name': 'ticker', 'type': 'str'}, {'name': 'endpoint', 'type': 'str'}],\n"
-            "      'return_type': 'dict',\n"
-            "      'docstring': 'Fetches data from {base_url}/{endpoint}?ticker={ticker}'\n"
+            "      'name': 'func_name',\n"
+            "      'args': [...],\n"
+            "      'return_type': '...',\n"
+            "      'docstring': '...'\n"
             "    }\n"
             "  ]\n"
             "}"
+        )
+
+        user_prompt = (
+            f"PROJECT: {arch_data.get('project_name')}\n"
+            f"TARGET MODULE: {target_module_name}\n"
+            f"DESCRIPTION: {target_mod_info.get('description')}\n\n"
+            f"{dep_context}\n"
+            "Generate the full spec.json."
         )
 
         # 在生成 Spec 之前檢查
@@ -150,8 +143,14 @@ class ProjectManager:
             print("[ProjectManager] Operation Cancelled.")
             return None
 
-        spec_data, entropy, _ = self.client.chat_complete_json(model_name, system_prompt, f"Context:\n{context_str}")
+        # 呼叫 LLM
+        spec_data, entropy, _ = self.client.chat_complete_json(model_name, system_prompt, user_prompt, cancel_event=cancel_event)
 
+        # 強制補全依賴
+        if 'dependencies' not in spec_data:
+            spec_data['dependencies'] = declared_deps
+
+        # 存檔 (現在 mod_dir 已經定義了)
         spec_path = os.path.join(mod_dir, "spec.json")
         with open(spec_path, 'w', encoding='utf-8') as f:
             json.dump(spec_data, f, indent=4, ensure_ascii=False)
@@ -168,6 +167,14 @@ class ProjectManager:
         with open(init_py_path, 'w', encoding='utf-8') as f:
             f.write(f"# Package marker for {target_module_name}\n")
         fragment_paths.append(init_py_path)
+
+        # [防禦性編程] 強制補全依賴 (以架構定義為準)
+        if 'dependencies' not in spec_data:
+            spec_data['dependencies'] = declared_deps
+
+        spec_path = os.path.join(mod_dir, "spec.json")
+        with open(spec_path, 'w', encoding='utf-8') as f:
+            json.dump(spec_data, f, indent=4, ensure_ascii=False)
 
         # 建立 Stubs
         progress_data['status'] = f"Creating file stubs..."

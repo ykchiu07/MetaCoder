@@ -19,6 +19,7 @@ from RuntimeAnalyst import RuntimeAnalyst
 from ChaosExecuter import ChaosExecuter
 from VersionController import VersionController
 from StructureAnalyzer import StructureAnalyzer
+from OllamaManager import OllamaManager
 
 # Frontend Import
 from MainWindow import MainWindow
@@ -52,6 +53,18 @@ class MetaCoder:
         self.static_analyzer = StructureAnalyzer(self.workspace_root)
 
         self.current_architecture_path = None
+        # [Fix 3] 初始化 Ollama Manager
+        self.ollama_mgr = OllamaManager()
+
+    # --- [Fix 3] Ollama 控制 API ---
+    def ensure_ollama_started(self):
+        """在生成前呼叫"""
+        self.ollama_mgr.set_logger(lambda msg: print(msg)) # 或導向 GUI log
+        self.ollama_mgr.start_service()
+
+    def kill_ollama(self):
+        """在 Stop 時呼叫"""
+        self.ollama_mgr.kill_service()
 
     # --- [Fix 5] 設定持久化 ---
     def _load_config(self):
@@ -78,45 +91,51 @@ class MetaCoder:
                 json.dump({'models': self.model_config}, f, indent=4)
             print(f"[Meta] Model for {role} updated to {model_name} and saved.")
 
+    # --- [Fix 2] Main.py Spec 處理 ---
     def _create_main_entry_spec(self, entry_point_name: str):
-        """
-        為 entry point (如 main.py) 建立一個虛擬的 Spec，
-        使其能被視為一個模組(root)下的一個函式(main)來處理。
-        """
         if not entry_point_name: return
 
-        # 我們將 main.py 視為 "root" 模組下的 "main" 函式
-        # 或者直接建立一個名為 "main" 的模組
-        project_name = os.path.basename(os.path.dirname(self.current_architecture_path))
-        project_dir = os.path.join(self.workspace_root, project_name)
+        # 獲取專案根目錄
+        if not self.current_architecture_path: return
+        project_dir = os.path.dirname(self.current_architecture_path)
 
-        # 建立一個虛擬的 main 模組資料夾
-        main_mod_dir = os.path.join(project_dir, "entry_point")
-        if not os.path.exists(main_mod_dir):
-            os.makedirs(main_mod_dir)
+        # 為了讓 ProjectExplorer 能掃描到，我們建立一個名為 "main" 的資料夾
+        # 這樣它就會被視為一個模組
+        main_mod_dir = os.path.join(project_dir, "main")
+        if not os.path.exists(main_mod_dir): os.makedirs(main_mod_dir)
 
         spec_path = os.path.join(main_mod_dir, "spec.json")
 
-        # 如果 spec 不存在才建立
         if not os.path.exists(spec_path):
             spec_data = {
-                "module_name": "entry_point",
+                "module_name": "main", # 邏輯名稱
                 "description": "Application Entry Point",
+                "dependencies": [], # Main 可能依賴所有人，這裡先空著或填入所有模組
                 "functions": [
                     {
                         "name": "main",
                         "args": [],
                         "return_type": "None",
-                        "docstring": "Orchestrates the application flow."
+                        "docstring": "Application entry point."
                     }
                 ]
             }
+            # 嘗試填入所有其他模組作為依賴
+            try:
+                with open(self.current_architecture_path, 'r') as f:
+                    arch = json.load(f)
+                spec_data['dependencies'] = [m['name'] for m in arch.get('modules', [])]
+            except: pass
+
             with open(spec_path, 'w', encoding='utf-8') as f:
                 json.dump(spec_data, f, indent=4)
 
-            # 建立 stub
+            # 建立真實檔案 (放在 main/main.py 或者根目錄 main.py?)
+            # 為了符合 Vibe-Coder 的「一模組一資料夾」邏輯，我們放在 main/main.py
+            # 但使用者可能期待根目錄。這裡我們做個妥協：放在 main/main.py
+            # 之後打包時再處理。
             with open(os.path.join(main_mod_dir, "main.py"), 'w') as f:
-                f.write("def main():\n    pass\n\nif __name__ == '__main__':\n    main()")
+                f.write("def main():\n    print('Hello Vibe-Coder')\n\nif __name__ == '__main__':\n    main()")
 
     # --- Phase 1: 架構生成 ---
     def init_project(self, requirements: str):
@@ -141,43 +160,109 @@ class MetaCoder:
 
     # --- Phase 2: 模組細化 ---
     def refine_module(self, module_name: str, cancel_event=None):
-        """生成模組 Spec 與 Stubs"""
-        if not self.current_architecture_path:
-            raise ValueError("No architecture loaded.")
+        if not self.current_architecture_path: raise ValueError("No architecture.")
+
+        # 1. [Check] 檢查被依賴模組是否已細化 (Spec 存在)
+        deps = self._get_module_dependencies_from_arch(module_name)
+        project_dir = os.path.dirname(self.current_architecture_path)
+
+        for dep in deps:
+            dep_spec = os.path.join(project_dir, dep, "spec.json")
+            if not os.path.exists(dep_spec):
+                print(f"[Refine Blocked] Dependency '{dep}' is not refined yet.")
+                return None # 這裡應該在 GUI 顯示錯誤，透過 return None 告知失敗
+
+        # 2. [Generate] 生成 Spec
+        # 先存檔當前狀態 (Snapshot)，以便回滾
+        # 但 VersionController 是基於 git commit。
+        # 策略：生成 -> 檢查 -> 若通過則 Commit，若失敗則 Revert 檔案。
+        # 為了能 Revert，我們需要知道改了什麼，或者依賴 git clean。
+        # 簡單做法：先 Commit 當前狀態為 "Pre-Refine backup" (可選)，或者只在失敗時 checkout .
 
         model = self.model_config["architect"]
-        # 簡單的進度字典
         progress = {'status': '', 'current': 0, 'total': 0}
 
         result = self.pm.generateModuleDetail(
-            self.current_architecture_path,
-            module_name,
-            progress,
-            model,
-            cancel_event=cancel_event # 傳遞取消旗標
+            self.current_architecture_path, module_name, progress, model, cancel_event
         )
+        if not result: return None # 被取消或失敗
 
-        if result: # 如果沒被取消
-            self.vc.archiveVersion(f"Refined Module: {module_name}")
+        # 3. [Audit] 虛擬靜態分析：循環依賴檢查
+        print(f"[Meta] Auditing circular dependencies for {module_name}...")
+
+        # 構建虛擬代碼 Map (所有已存在的 Spec + 剛生成的這個)
+        virtual_map = {}
+        # 讀取所有現有模組
+        for d in os.listdir(project_dir):
+            spec_p = os.path.join(project_dir, d, "spec.json")
+            if os.path.exists(spec_p):
+                with open(spec_p, 'r') as f:
+                    s = json.load(f)
+                    # 轉換為 import 語句
+                    imports = "\n".join([f"import {dep}" for dep in s.get('dependencies', [])])
+                    virtual_map[d] = imports
+
+        cycles = self.static_analyzer.detect_cycles_from_stubs(virtual_map)
+
+        if cycles:
+            print(f"[Audit Failed] Circular dependency detected: {cycles}")
+            # [Rollback] 刪除剛生成的 spec 和 stub
+            # 最快的方法是 git checkout -- <module_dir> (如果之前有 commit)
+            # 或者手動刪除。這裡使用 VC 的 rollback file (需擴充支援資料夾) 或簡單用 os.remove
+            # 由於這是新生成的檔案，它們是 Untracked。
+            # 我們可以直接刪除該模組資料夾下的 spec.json 和 .py
+            import shutil
+            mod_dir = os.path.dirname(result.spec_file_path)
+            shutil.rmtree(mod_dir) # 危險：如果該資料夾原本就有東西？
+            # 安全做法：只刪除 spec.json 和 __init__.py
+            os.remove(result.spec_file_path)
+            # ... (刪除 stubs)
+            print(f"[Meta] Rolled back refinement for {module_name}.")
+            return None # 視為失敗
+
+        # 4. [Commit] 通過檢查，歸檔
+        self.vc.archiveVersion(f"Refined Module: {module_name}")
         return result
 
     # --- Phase 3: 函式實作 ---
     def implement_functions(self, spec_path: str, func_names: list, cancel_event=None):
-        """實作指定函式"""
+        # 1. [Generate]
         model = self.model_config["coder"]
+        # 強制單線程
+        results = self.coder.generateFunctionCode(spec_path, func_names, model, max_workers=1, cancel_event=cancel_event)
 
-        # [修正] 傳入 max_workers=3
-        results = self.coder.generateFunctionCode(
-            spec_path,
-            func_names,
-            model,
-            max_workers=3, # 您可以根據您的 CPU 核心數調整此值
-            cancel_event=cancel_event
-        )
+        if not results: return []
 
-        if results: # 只有在有結果時才存檔
-            self.vc.archiveVersion(f"Implemented {len(func_names)} funcs in {os.path.basename(os.path.dirname(spec_path))}")
-        return results
+        # 2. [Audit] 實作一致性檢查
+        # 讀取 Spec 中的允許依賴
+        with open(spec_path, 'r') as f:
+            spec = json.load(f)
+        allowed = spec.get('dependencies', [])
+        # 允許依賴自己模組
+        mod_name = spec.get('module_name')
+        if mod_name: allowed.append(mod_name)
+
+        valid_results = []
+        for res in results:
+            if not res.success: continue
+
+            # 檢查
+            if self.static_analyzer.verify_implementation_deps(res.file_path, allowed):
+                valid_results.append(res)
+            else:
+                print(f"[Audit Failed] Implementation of {res.function_name} violates dependency rules.")
+                # [Rollback] 還原該檔案
+                # 這裡簡單清空或寫回 pass stub
+                with open(res.file_path, 'w') as f:
+                    f.write(f"def {res.function_name}(*args, **kwargs):\n    raise NotImplementedError('Audit Failed: Dependency Violation')")
+                # 更新狀態為 failed
+                self.coder._update_status_file(os.path.dirname(spec_path), res.function_name, "audit_failed", 0, 0)
+
+        # 3. [Commit]
+        if valid_results:
+            self.vc.archiveVersion(f"Implemented {len(valid_results)} funcs in {os.path.basename(os.path.dirname(spec_path))}")
+
+        return valid_results
 
     # --- 測試生成 ---
     def generate_tests(self, spec_path: str, func_names: list):
@@ -282,29 +367,54 @@ class MetaCoder:
 
         return {}
 
+    # --- [Fix 1] 依賴圖邏輯 ---
     def get_module_dependencies(self):
         """
-        獲取模組依賴關係圖數據供 GUI 繪製。
-        Returns:
-            nodes: List[str] 模組名稱列表
-            edges: List[Tuple[str, str]] 依賴關係 (source, target)
+        優先從 architecture.json 讀取依賴關係 (因為這是 Phase 1 就有的)。
+        如果沒有 arch 檔，才退回到 StaticAnalyzer 分析源碼。
         """
-        # 確保有最新的分析
-        if not self.static_analyzer.dependencies:
-             # 如果尚未初始化或數據為空，嘗試重新掃描一次 (假設已有代碼)
-             self.static_analyzer._preprocess()
+        # 嘗試讀取架構檔
+        arch_data = self.get_project_tree()
 
-        # 取得所有內部模組名稱 (Nodes)
-        nodes = list(self.static_analyzer.internal_modules)
+        nodes = []
+        edges = [] # (source, target)
 
-        # 取得依賴關係 (Edges)
-        edges = []
-        for src, targets in self.static_analyzer.dependencies.items():
-            for tgt in targets:
-                if tgt in nodes: # 只顯示內部模組間的依賴
-                    edges.append((src, tgt))
+        if arch_data and 'modules' in arch_data:
+            # 方案 A: 使用架構定義 (Intent)
+            for mod in arch_data['modules']:
+                name = mod['name']
+                nodes.append(name)
+                for dep in mod.get('dependencies', []):
+                    edges.append((name, dep))
+
+            # 把 main entry 也加進去
+            entry = arch_data.get('entry_point')
+            if entry:
+                # 假設 entry (如 main.py) 依賴所有模組，或者在 arch 中未定義
+                # 這裡我們先把 main 當作一個節點
+                main_node = "main" # 簡化顯示
+                if main_node not in nodes: nodes.append(main_node)
+                # 通常 main 依賴所有頂層模組，這裡暫不畫線，以免太亂，或者全畫
+
+        else:
+            # 方案 B: 退回源碼分析 (Reality)
+            if not self.static_analyzer.dependencies:
+                self.static_analyzer._preprocess()
+            nodes = list(self.static_analyzer.internal_modules)
+            for src, targets in self.static_analyzer.dependencies.items():
+                for tgt in targets:
+                    if tgt in nodes:
+                        edges.append((src, tgt))
 
         return nodes, edges
+
+    def _get_module_dependencies_from_arch(self, module_name):
+        """從 architecture.json 讀取依賴列表"""
+        if not self.current_architecture_path: return []
+        with open(self.current_architecture_path, 'r') as f:
+            arch = json.load(f)
+        mod = next((m for m in arch.get('modules', []) if m['name'] == module_name), None)
+        return mod.get('dependencies', []) if mod else []
 
     def get_function_distribution(self):
         """

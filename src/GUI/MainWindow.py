@@ -115,6 +115,10 @@ class MainWindow:
         self.root.after(1000, self._check_queue_loop)
 
     def run_async(self, task_func, success_callback=None, error_callback=None, cancel_callback=None):
+        # [Fix 3] 任務進來時，確保服務啟動
+        # 注意：這可能會卡住 UI 一兩秒，最好放在 Worker 裡面做
+        # 但為了簡單，我們在這裡呼叫，反正 OllamaManager 有 check running
+
         task_item = {
             'func': task_func,
             'success': success_callback,
@@ -131,6 +135,11 @@ class MainWindow:
         self.controls.set_running_state(True)
 
         def worker():
+
+            # [Fix 3] Worker 啟動時確保 Ollama 活著
+            self.log("[System] Ensuring Ollama service is running...")
+            self.meta.ensure_ollama_started()
+
             while True:
                 try:
                     # 阻塞式獲取，直到有任務或 timeout (讓出檢查 stop flag)
@@ -171,7 +180,12 @@ class MainWindow:
 
     def stop_current_task(self):
         if self._is_worker_running:
-            self.log("[System] Stopping all tasks...")
+            self.log("[System] NUCLEAR STOP DETECTED. Killing Ollama...")
+
+            # [Fix 3] 核選項：先殺服務
+            self.meta.kill_ollama()
+
+            # 再設定旗標清空隊列
             self._current_cancel_flag.set()
 
     # --- Actions ---

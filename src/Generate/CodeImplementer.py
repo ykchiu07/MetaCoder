@@ -210,7 +210,7 @@ class CodeImplementer:
 
         return results
 
-def implement_function_direct(self, spec_path: str, func_name: str, model_name: str, cancel_event=None) -> ImplementationResult:
-        with open(spec_path, 'r') as f: spec_data = json.load(f)
-        module_dir = os.path.dirname(spec_path)
-        return self._implement_single_function(spec_data, func_name, module_dir, model_name, None, cancel_event)
+    def implement_function_direct(self, spec_path: str, func_name: str, model_name: str, cancel_event=None) -> ImplementationResult:
+            with open(spec_path, 'r') as f: spec_data = json.load(f)
+            module_dir = os.path.dirname(spec_path)
+            return self._implement_single_function(spec_data, func_name, module_dir, model_name, None, cancel_event)

@@ -31,6 +31,7 @@ class ProjectExplorer:
         # 啟動動畫迴圈
         self._animate_loading()
 
+
     def _animate_loading(self):
         """處理旋轉動畫"""
         if self._loading_items:
@@ -57,26 +58,30 @@ class ProjectExplorer:
 
         self.frame.after(100, self._animate_loading)
 
-    def set_item_loading(self, func_name, is_loading):
+    def set_item_loading(self, name, is_loading):
         """
-        [API] 設定某個函式的 Loading 狀態
-        需要遍歷 Tree 找到對應的 func_name item... 這效能較差，
-        但考慮到樹不大，暫時可行。
+        [修正] 支援函式或模組名稱的 Loading。
+        name: func_name 或 module_name
         """
         for item_id in self.tree.get_children(): # Project
-            for mod_id in self.tree.get_children(item_id): # Module
-                for func_id in self.tree.get_children(mod_id): # Function
-                    text = self.tree.item(func_id, "text").split("  ")[0]
-                    # 移除可能的 ✔ 標記
-                    text = text.replace(" ✔", "")
+            # 檢查是不是模組
+            item_text = self.tree.item(item_id, "text").split(" ")[0]
+            if item_text == name: # 這是根節點(Project)，通常不會 loading，略過
+                pass
 
-                    if text == func_name:
-                        if is_loading:
-                            self._loading_items.add(func_id)
-                        else:
-                            self._loading_items.discard(func_id)
-                            # 恢復原狀 (刷新時會自動加上勾勾，這裡先重置)
-                            self.tree.item(func_id, text=text)
+            for mod_id in self.tree.get_children(item_id): # Module
+                mod_text = self.tree.item(mod_id, "text").split(" ")[0]
+                if mod_text == name:
+                    # 找到模組
+                    if is_loading: self._loading_items.add(mod_id)
+                    else: self._loading_items.discard(mod_id)
+                    # 這裡不 return，因為可能還有同名的 func (雖然機率低)
+
+                for func_id in self.tree.get_children(mod_id): # Function
+                    func_text = self.tree.item(func_id, "text").split(" ")[0]
+                    if func_text == name:
+                        if is_loading: self._loading_items.add(func_id)
+                        else: self._loading_items.discard(func_id)
                         return
 
     def _get_status_map(self, mod_dir):
@@ -252,15 +257,16 @@ class ProjectExplorer:
         if not target_modules: return
 
         def task():
-            self.mediator.log(f"Batch Refining: {target_modules}")
             for mod in target_modules:
                 if self.mediator._current_cancel_flag.is_set(): break
-
-                # [Fix 2] 明確日誌
                 self.mediator.log(f"[Action] Refining module '{mod}'...")
 
-                self.mediator.meta.refine_module(mod, cancel_event=self.mediator._current_cancel_flag)
-            self.frame.after(0, self.refresh_tree)
+                res = self.mediator.meta.refine_module(mod, cancel_event=self.mediator._current_cancel_flag)
+
+                if res is None:
+                    self.mediator.log(f"[Fail] Refinement of {mod} failed/blocked.")
+
+            self.frame.after(0, self.refresh_tree) # 刷新會清除 loading
 
         self.mediator.run_async(task)
 
@@ -294,8 +300,10 @@ class ProjectExplorer:
 
             # [依賴鎖定]
             if not self.meta.check_dependencies_met(mod_name):
-                self.mediator.log(f"[Blocked] Cannot implement {mod_name}: Dependencies not met.")
-                # 這裡可以彈窗警告
+                msg = f"Cannot implement module '{mod_name}'.\nDependencies not met.\n\nPlease implement dependent modules first."
+                self.mediator.log(f"[Blocked] {msg}")
+                # [Fix 5] 彈窗警告
+                tk.messagebox.showwarning("Dependency Error", msg)
                 continue
 
             # 2. 為每個函式建立獨立任務

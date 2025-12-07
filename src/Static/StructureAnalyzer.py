@@ -192,3 +192,72 @@ class StructureAnalyzer:
             return 0.0
 
         return round(abstract_classes / total_classes, 2)
+
+
+    # --- [新增] 虛擬靜態分析 (Phase 2 Check) ---
+    def detect_cycles_from_stubs(self, virtual_code_map: dict) -> list:
+        """
+        基於虛擬代碼 map { 'mod_name': 'import a\nimport b' } 檢測循環依賴。
+        Returns: list of cycles (e.g. [['a', 'b', 'a']])
+        """
+        temp_graph = nx.DiGraph()
+
+        for mod, code in virtual_code_map.items():
+            temp_graph.add_node(mod)
+            # 簡單解析 import
+            for line in code.splitlines():
+                if line.startswith("import "):
+                    target = line.split(" ")[1].strip()
+                    temp_graph.add_edge(mod, target)
+                elif line.startswith("from "):
+                    parts = line.split(" ")
+                    if len(parts) >= 2:
+                        target = parts[1].strip().split('.')[0] # 取頂層模組
+                        temp_graph.add_edge(mod, target)
+
+        try:
+            return list(nx.simple_cycles(temp_graph))
+        except:
+            return []
+
+    # --- [新增] 實作一致性檢查 (Phase 3 Check) ---
+    def verify_implementation_deps(self, code_path: str, allowed_deps: list) -> bool:
+        """
+        解析真實 Python 檔案，確認其 import 是否超出 allowed_deps 範圍。
+        """
+        try:
+            with open(code_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+
+            # 使用 ASTGraph 解析
+            g = ASTGraph.ASTGraph()
+            p = PythonSourceParser.PythonSourceParser(g)
+            p.analyze_code(code)
+
+            actual_imports = set()
+            for _, data in g.graph.nodes(data=True):
+                if data.get('type') == 'import':
+                    label = data.get('label', '')
+                    # 處理 "from x import y" 或 "import x"
+                    # 簡化邏輯：抓第一個 token
+                    token = label.replace("from ", "").replace("import ", "").split(" ")[0].split('.')[0]
+                    actual_imports.add(token)
+
+            # 檢查是否違反 (忽略標準庫，這裡假設 internal_modules 已正確填充)
+            # 若 internal_modules 為空，需重新初始化
+            if not self.internal_modules:
+                self._preprocess()
+
+            for imp in actual_imports:
+                # 如果是專案內部的模組，但不在允許列表內 -> 違規
+                if imp in self.internal_modules and imp not in allowed_deps:
+                    # 排除自己
+                    # 取得 code_path 所屬模組名...這裡簡化，假設呼叫者會處理
+                    print(f"[Audit] Violation: Imported '{imp}' but only {allowed_deps} allowed.")
+                    return False
+
+            return True
+
+        except Exception as e:
+            print(f"[Audit Error] {e}")
+            return False # 保守策略：分析失敗視為失敗
