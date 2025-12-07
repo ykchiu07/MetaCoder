@@ -212,19 +212,52 @@ class WorkSpace:
             self.canvas.create_rectangle(legend_x, y, legend_x+12, y+12, fill=color_map[mod], outline="")
             self.canvas.create_text(legend_x+20, y, text=mod, fill="#ccc", anchor="nw")
 
+    # --- [關鍵修正] 補上缺失的 helper method ---
+    def _get_spec_path(self, mod_name):
+        """
+        搜尋模組的 spec.json 路徑。
+        優先搜尋 workspace/mod_name/spec.json
+        其次搜尋 workspace/*/mod_name/spec.json
+        """
+        root = self.mediator.meta.workspace_root
+
+        # 1. 檢查根目錄下
+        p1 = os.path.join(root, mod_name, "spec.json")
+        if os.path.exists(p1): return p1
+
+        # 2. 檢查第一層子目錄下 (針對專案資料夾結構)
+        for d in os.listdir(root):
+            d_path = os.path.join(root, d)
+            if os.path.isdir(d_path):
+                p2 = os.path.join(d_path, mod_name, "spec.json")
+                if os.path.exists(p2): return p2
+
+        return None
+
     def on_canvas_click(self, event):
         clicked_something = False
         for x1, y1, x2, y2, func, mod, color in self._hit_areas:
             if x1 <= event.x <= x2 and y1 <= event.y <= y2:
                 self.selected_node = (func, mod)
                 self.draw_dependency_graph()
+
+                # [Fix 4] 通知 ControlPanel 更新按鈕
+                spec_path = self._get_spec_path(mod)
+                if spec_path:
+                    self.mediator.controls.update_context_button('impl', (func, spec_path))
+
                 self.graph_menu.post(event.x_root, event.y_root)
                 clicked_something = True
                 break
+
         if not clicked_something:
             if self.selected_node:
                 self.selected_node = None
                 self.draw_dependency_graph()
+
+                # [Fix 4] 恢復預設按鈕
+                self.mediator.controls.update_context_button('arch', None)
+
             try: self.graph_menu.unpost()
             except: pass
 

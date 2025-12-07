@@ -79,7 +79,7 @@ class OllamaClient:
         user_prompt: str,
         temperature: float = 0.3,
         images: Optional[List[str]] = None,
-        cancel_event=None # [新增] 接收取消事件
+        cancel_event=None
     ) -> Tuple[str, float]:
         """
         [修正] 支援 cancel_event 的原始文字請求 (Stream Mode)
@@ -107,25 +107,38 @@ class OllamaClient:
 
         full_content = ""
         try:
-            with requests.post(f"{self.base_url}/api/chat", json=payload, stream=True) as response:
+            # 使用 stream=True
+            with requests.post(f"{self.base_url}/api/chat", json=payload, stream=True, timeout=60) as response:
                 response.raise_for_status()
+
+                # [Fix 1] 使用 iter_lines 並設定 chunk_size，確保能頻繁進入迴圈檢查 cancel
+                # 注意：Ollama 的 stream 回應是按行傳送 JSON 物件的
                 for line in response.iter_lines():
-                    # [關鍵] 檢查取消
+
+                    # [Fix 1] 每次迭代都檢查
                     if cancel_event and cancel_event.is_set():
                         print("[Ollama] Request cancelled by user.")
+                        # 這裡我們直接 return，requests 的 context manager 會自動關閉連線 (TCP close)
+                        # 這通常足以讓 Ollama Server 停止生成 (Broken Pipe)
                         raise InterruptedError("Task Cancelled")
 
                     if line:
-                        chunk = json.loads(line)
-                        if 'message' in chunk:
-                            content = chunk['message'].get('content', '')
-                            full_content += content
-                            # 這裡其實可以做即時 UI 輸出 (Streaming Output)，未來可擴充
+                        try:
+                            chunk = json.loads(line)
+                            if 'message' in chunk:
+                                content = chunk['message'].get('content', '')
+                                full_content += content
+                                # if chunk.get('done'): break
+                        except: pass
 
             return full_content, 0.0
 
         except InterruptedError:
+            # 拋出讓上層捕捉
             raise
         except Exception as e:
+            # Timeout 或其他網絡錯誤
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Task Cancelled")
             print(f"[OllamaClient Raw Error] {e}")
             return f"Error: {str(e)}", -1.0

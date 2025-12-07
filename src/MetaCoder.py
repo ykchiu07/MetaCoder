@@ -26,16 +26,21 @@ from MainWindow import MainWindow
 class MetaCoder:
     def __init__(self, workspace_root: str = "./vibe_workspace"):
         self.workspace_root = os.path.abspath(workspace_root)
+        # [Fix 5] 設定檔路徑
+        self.config_path = os.path.join(self.workspace_root, "vibe_config.json")
 
-        # [Config] 模型角色設定 (預設值)
+        # 預設設定
         self.model_config = {
-            "architect": "gemma3:12b",  # 負責架構生成、Spec 細化
-            "coder": "gemma3:12b",      # 負責寫程式碼 (需較強邏輯)
-            "analyst": "gemma3:12b",    # 負責瓶頸分析、弱點掃描
-            "vision": "gemma3:4b"       # 負責 GUI 截圖分析
+            "architect": "gemma3:12b",
+            "coder": "gemma3:12b",
+            "analyst": "gemma3:12b",
+            "vision": "gemma3:4b"
         }
 
-        # [Backend] 初始化所有子系統
+        # 嘗試載入設定 (如果存在)
+        self._load_config()
+
+        # 初始化子系統 (保持不變)
         self.vc = VersionController(self.workspace_root)
         self.pm = ProjectManager(self.workspace_root)
         self.coder = CodeImplementer()
@@ -46,8 +51,16 @@ class MetaCoder:
         self.analyst = RuntimeAnalyst()
         self.static_analyzer = StructureAnalyzer(self.workspace_root)
 
-        # [State] 當前狀態快取
         self.current_architecture_path = None
+
+    # --- [Fix 5] 設定持久化 ---
+    def _load_config(self):
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    saved = json.load(f)
+                    self.model_config.update(saved.get('models', {}))
+            except: pass
 
     def run(self):
         """啟動 GUI 主迴圈"""
@@ -60,17 +73,69 @@ class MetaCoder:
     def update_model_config(self, role: str, model_name: str):
         if role in self.model_config:
             self.model_config[role] = model_name
-            print(f"[Meta] Model for {role} updated to {model_name}")
+            # 立即存檔
+            with open(self.config_path, 'w') as f:
+                json.dump({'models': self.model_config}, f, indent=4)
+            print(f"[Meta] Model for {role} updated to {model_name} and saved.")
+
+    def _create_main_entry_spec(self, entry_point_name: str):
+        """
+        為 entry point (如 main.py) 建立一個虛擬的 Spec，
+        使其能被視為一個模組(root)下的一個函式(main)來處理。
+        """
+        if not entry_point_name: return
+
+        # 我們將 main.py 視為 "root" 模組下的 "main" 函式
+        # 或者直接建立一個名為 "main" 的模組
+        project_name = os.path.basename(os.path.dirname(self.current_architecture_path))
+        project_dir = os.path.join(self.workspace_root, project_name)
+
+        # 建立一個虛擬的 main 模組資料夾
+        main_mod_dir = os.path.join(project_dir, "entry_point")
+        if not os.path.exists(main_mod_dir):
+            os.makedirs(main_mod_dir)
+
+        spec_path = os.path.join(main_mod_dir, "spec.json")
+
+        # 如果 spec 不存在才建立
+        if not os.path.exists(spec_path):
+            spec_data = {
+                "module_name": "entry_point",
+                "description": "Application Entry Point",
+                "functions": [
+                    {
+                        "name": "main",
+                        "args": [],
+                        "return_type": "None",
+                        "docstring": "Orchestrates the application flow."
+                    }
+                ]
+            }
+            with open(spec_path, 'w', encoding='utf-8') as f:
+                json.dump(spec_data, f, indent=4)
+
+            # 建立 stub
+            with open(os.path.join(main_mod_dir, "main.py"), 'w') as f:
+                f.write("def main():\n    pass\n\nif __name__ == '__main__':\n    main()")
 
     # --- Phase 1: 架構生成 ---
     def init_project(self, requirements: str):
-        """生成專案藍圖"""
         model = self.model_config["architect"]
         print(f"[Meta] Initializing project with {model}...")
 
         result = self.pm.generateHighStructure(requirements, model)
-
         self.current_architecture_path = result.structure_file_path
+
+        # [Fix 6] 讀取架構檔，檢查是否有 entry_point 並生成 spec
+        try:
+            with open(self.current_architecture_path, 'r') as f:
+                arch = json.load(f)
+            entry = arch.get('entry_point')
+            if entry:
+                self._create_main_entry_spec(entry)
+        except Exception as e:
+            print(f"[Meta] Error handling entry point: {e}")
+
         self.vc.archiveVersion(f"Init Project: {requirements[:20]}")
         return result
 
@@ -275,26 +340,18 @@ class MetaCoder:
         return distribution
 
     def set_workspace(self, new_path: str):
-        """
-        [關鍵修正] 切換工作區並重置所有後端狀態。
-        防止舊專案的資料殘留。
-        """
         print(f"[Meta] Switching workspace to: {new_path}")
         self.workspace_root = os.path.abspath(new_path)
+        self.config_path = os.path.join(self.workspace_root, "vibe_config.json")
 
-        # 1. 強制重新初始化所有依賴路徑的子系統
         self.vc = VersionController(self.workspace_root)
         self.pm = ProjectManager(self.workspace_root)
-        self.static_analyzer = StructureAnalyzer(self.workspace_root) # 清空舊的依賴圖
+        self.static_analyzer = StructureAnalyzer(self.workspace_root)
         self.chaos_runner = ChaosExecuter(self.workspace_root)
-
-        # 2. 清空快取狀態
         self.current_architecture_path = None
 
-        # 3. 嘗試自動載入新專案的架構檔 (如果存在)
-        # 這裡會更新 current_architecture_path，讓 ProjectExplorer 的監控迴圈能抓到
+        self._load_config() # 載入該 Workspace 的特定設定
         self.get_project_tree()
-
         print("[Meta] Workspace reset complete.")
 
     def check_dependencies_met(self, module_name: str) -> bool:

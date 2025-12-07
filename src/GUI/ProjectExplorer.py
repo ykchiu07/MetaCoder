@@ -248,12 +248,20 @@ class ProjectExplorer:
             vals = self.tree.item(item, "values")
             if vals and vals[0] == "module":
                 target_modules.append(self.tree.item(item, "text"))
+
         if not target_modules: return
+
         def task():
+            self.mediator.log(f"Batch Refining: {target_modules}")
             for mod in target_modules:
                 if self.mediator._current_cancel_flag.is_set(): break
+
+                # [Fix 2] 明確日誌
+                self.mediator.log(f"[Action] Refining module '{mod}'...")
+
                 self.mediator.meta.refine_module(mod, cancel_event=self.mediator._current_cancel_flag)
             self.frame.after(0, self.refresh_tree)
+
         self.mediator.run_async(task)
 
     def on_implement(self):
@@ -297,7 +305,9 @@ class ProjectExplorer:
                 # 使用 closure 捕捉變數
                 def make_task(s_path, f_name, m_name):
                     def task_func():
-                        self.mediator.log(f"Implementing {f_name} in {m_name}...")
+                        # [Fix 2] 開始生成時顯示
+                        self.mediator.log(f"[Action] Generating code for {f_name} (in {m_name})...")
+
                         result = self.meta.coder.implement_function_direct(
                             s_path, f_name,
                             self.meta.model_config['coder'],
