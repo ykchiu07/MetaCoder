@@ -530,9 +530,14 @@ class MetaCoder:
                 self.tester.generateUnitTest(spec_path, funcs, self.model_config['coder'])
 
             # 2. 執行測試
-            mod_name = target_name if target_type == 'module' else os.path.basename(os.path.dirname(spec_path))
-            mediator.log(f"[Test] Running tests for module: {mod_name}")
+            # [Fix 3 延伸] 確保傳入正確的 module_name
+            # 如果 target_type 是 'function'，target_name 是函式名，我們需要找出模組名
+            if target_type == 'function':
+                mod_name = os.path.basename(os.path.dirname(spec_path))
+            else:
+                mod_name = target_name
 
+            mediator.log(f"[Test] Running tests for module: {mod_name}")
             results = self.test_runner.run_module_tests(mod_name)
 
             # 3. 輸出結果與更新 Graph

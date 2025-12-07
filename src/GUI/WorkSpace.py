@@ -230,49 +230,43 @@ class WorkSpace:
             self.draw_module_view()
             return
 
-        # === Function View ===
         self.canvas.delete("all")
         self._hit_areas = []
 
-        # 1. 準備數據
         data = self.mediator.meta.get_function_distribution()
         if not data:
             self.canvas.create_text(400, 300, text="No function data found.", fill="#666", font=("Arial", 14))
             return
 
         modules = list(data.keys())
-        # 為 Creation 模式準備顏色 (Legacy Behavior)
+        # Creation 模式顏色
         mod_colors = self._generate_colors(len(modules))
         mod_color_map = {mod: col for mod, col in zip(modules, mod_colors)}
 
         current_data_mode = self.mediator.controls.current_mode.get()
         is_creation_mode = (current_data_mode == "creation")
 
-        # 2. 佈局計算 (同心圓或分散式佈局)
+        # 佈局計算
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         if width < 100: width = 800
         if height < 100: height = 600
 
         center_x, center_y = width / 2, height / 2
-        max_radius = min(width, height) / 2 - 80 # 留邊距
+        max_radius = min(width, height) / 2 - 80
         total_modules = len(modules)
         angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
 
-        # 儲存節點位置以便畫線: { 'module_name.func_name': (x, y) }
         node_pos_map = {}
-        # 儲存節點資訊以便繪圖
         node_render_list = []
 
+        # --- 第一階段：計算位置與節點 ---
         for i, mod in enumerate(modules):
             funcs = data[mod]
             start_angle = i * angle_per_mod
-
-            # 使用該模組的固定顏色 (Creation Mode)
-            base_color = mod_color_map[mod]
+            base_color = mod_color_map.get(mod, "#888")
 
             for j, func in enumerate(funcs):
-                # 簡單的散列算法讓節點分佈在扇形區域
                 random.seed(hash(mod + func))
                 theta = start_angle + (angle_per_mod * 0.2) + (angle_per_mod * 0.6 * random.random())
                 r = max_radius * (0.3 + 0.6 * random.random())
@@ -280,65 +274,68 @@ class WorkSpace:
                 x = center_x + r * math.cos(theta)
                 y = center_y + r * math.sin(theta)
 
-                # 記錄位置 (Key: "auth.login")
                 full_name = f"{mod}.{func}"
                 node_pos_map[full_name] = (x, y)
+                # 同時允許只用 func 當 key (如果函式名唯一)
+                node_pos_map[func] = (x, y)
 
-                # [Fix 2] 決定顏色
                 if is_creation_mode:
-                    # Create 模式：依模組分色
                     color = base_color
                 else:
-                    # 其他模式：依紅綠燈邏輯
                     color = self.mediator.meta.traffic_light.get_color('function', current_data_mode, func, parent_mod=mod)
 
                 node_render_list.append({
                     'x': x, 'y': y, 'func': func, 'mod': mod, 'color': color, 'full_name': full_name
                 })
 
-        # 3. [Fix 1] 繪製依賴連線 (Edges)
-        # 我們需要讀取 spec.json 中的 'required_calls'
-        # 為了避免 I/O 太慢，我們只讀取一次
-        project_root = self.mediator.meta.workspace_root
-
+        # --- 第二階段：[Fix 1] 繪製連線 ---
+        # 策略：讀取 Spec 中的 required_calls (Phase 2產物) 和 靜態分析依賴 (Phase 3產物)
         for mod in modules:
             spec_path = self._get_spec_path(mod)
             if spec_path and os.path.exists(spec_path):
                 try:
                     with open(spec_path, 'r') as f: spec = json.load(f)
                     for f_spec in spec.get('functions', []):
-                        caller_name = f"{mod}.{f_spec['name']}"
+                        caller_func = f_spec['name']
+                        caller_full = f"{mod}.{caller_func}"
 
-                        # 檢查 required_calls
-                        req_calls = f_spec.get('required_calls', [])
-                        for callee_raw in req_calls:
-                            # callee_raw 可能是 "db.connect"
-                            if caller_name in node_pos_map and callee_raw in node_pos_map:
-                                x1, y1 = node_pos_map[caller_name]
-                                x2, y2 = node_pos_map[callee_raw]
+                        # 取得目標列表
+                        targets = f_spec.get('required_calls', [])
 
-                                # [Fix 4] 使用箭頭座標修正
-                                sx, sy, ex, ey = self._get_arrow_coords(x1, y1, x2, y2, radius=12)
+                        for tgt in targets:
+                            # tgt 可能是 "auth.login" 或 "login"
+                            # 嘗試匹配位置
+                            start_pos = node_pos_map.get(caller_full) or node_pos_map.get(caller_func)
+                            end_pos = node_pos_map.get(tgt)
 
-                                self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#666", width=1, dash=(2, 4))
-                except: pass
+                            # 如果找不到，嘗試拼湊 module name
+                            if not end_pos and "." not in tgt:
+                                # 嘗試遍歷所有模組找這個函式
+                                for candidate_mod in modules:
+                                    candidate_full = f"{candidate_mod}.{tgt}"
+                                    if candidate_full in node_pos_map:
+                                        end_pos = node_pos_map[candidate_full]
+                                        break
 
-        # 4. 繪製節點 (Nodes) - 畫在線上面
-        node_r = 12 # 半徑
+                            if start_pos and end_pos:
+                                sx, sy, ex, ey = self._get_arrow_coords(start_pos[0], start_pos[1], end_pos[0], end_pos[1], radius=12)
+                                self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#aaa", width=1, dash=(2, 4))
+                except Exception as e:
+                    pass
+
+        # --- 第三階段：繪製節點 ---
+        node_r = 12
         for n in node_render_list:
             x, y = n['x'], n['y']
 
-            # 選中效果
             if self.selected_node == (n['func'], n['mod']):
                 self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline="white", width=2)
 
             self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=n['color'], outline="#333", width=1)
             self.canvas.create_text(x, y + 18, text=n['func'], fill="#ccc", font=("Consolas", 8))
 
-            # 註冊點擊區域
             self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, n['func'], n['mod'], n['color']))
 
-        # 5. [Fix 3] Legend 只在 Creation 模式顯示
         if is_creation_mode:
             self._draw_legend(width, height, modules, mod_color_map)
 
@@ -352,46 +349,36 @@ class WorkSpace:
             self.canvas.create_rectangle(legend_x, y, legend_x+12, y+12, fill=color_map[mod], outline="")
             self.canvas.create_text(legend_x+20, y, text=mod, fill="#ccc", anchor="nw")
 
-    # --- [關鍵修正] 補上缺失的 helper method ---
+    # [Fix 2] 優化路徑搜尋，確保能找到 spec.json
     def _get_spec_path(self, mod_name):
-        """
-        搜尋模組的 spec.json 路徑。
-        優先搜尋 workspace/mod_name/spec.json
-        其次搜尋 workspace/*/mod_name/spec.json
-        """
         root = self.mediator.meta.workspace_root
-
-        # 1. 檢查根目錄下
+        # 1. 直接在 root 下找
         p1 = os.path.join(root, mod_name, "spec.json")
         if os.path.exists(p1): return p1
 
-        # 2. 檢查第一層子目錄下 (針對專案資料夾結構)
+        # 2. 在第一層子目錄找
         for d in os.listdir(root):
             d_path = os.path.join(root, d)
             if os.path.isdir(d_path):
                 p2 = os.path.join(d_path, mod_name, "spec.json")
                 if os.path.exists(p2): return p2
-
         return None
 
     def on_canvas_click(self, event):
         clicked_something = False
-        current_mode = self.mediator.controls.current_mode.get() # 獲取當前模式
+        current_mode = self.mediator.controls.current_mode.get()
 
         for x1, y1, x2, y2, func, mod, color in self._hit_areas:
             if x1 <= event.x <= x2 and y1 <= event.y <= y2:
                 self.selected_node = (func, mod)
-                self.draw_dependency_graph() # 重繪以顯示選中框
+                self.draw_dependency_graph()
 
                 spec_path = self._get_spec_path(mod)
+                # print(f"[Debug] Clicked {func} in {mod}, Spec: {spec_path}, Mode: {current_mode}") # 除錯用
 
-                # [Fix 2] 恢復 Create 模式下的互動邏輯
+                # [Fix 2] 確保 Creation 模式下能觸發 Implement
                 if current_mode == 'creation' and spec_path:
-                    # 1. 更新下方 Control Panel 的按鈕
                     self.mediator.controls.update_context_button('impl', (func, spec_path))
-
-                    # 2. 彈出右鍵選單 (Optionally, if user specifically asks for context menu)
-                    # 這裡我們讓左鍵點擊也能觸發選單，方便操作
                     self.graph_menu.post(event.x_root, event.y_root)
 
                 clicked_something = True
@@ -401,11 +388,8 @@ class WorkSpace:
             if self.selected_node:
                 self.selected_node = None
                 self.draw_dependency_graph()
-
-                # 清除 Control Panel 狀態
                 if current_mode == 'creation':
                     self.mediator.controls.update_context_button('arch', None)
-
             try: self.graph_menu.unpost()
             except: pass
 
