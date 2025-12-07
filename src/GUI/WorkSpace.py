@@ -45,7 +45,6 @@ class WorkSpace:
 
         # --- Tab 2: Dependency Graph ---
         self.canvas = tk.Canvas(self.notebook, bg=self.colors['editor_bg'], highlightthickness=0)
-        self.notebook.add(self.canvas, text="Dependency Graph")
 
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self._hit_areas = []
@@ -186,6 +185,9 @@ class WorkSpace:
             self.canvas.create_text(400, 300, text="No module data.", fill="#666")
             return
 
+        # 取得當前控制面板的功能模式 (creation, static_eval...)
+        current_data_mode = self.mediator.controls.current_mode.get()
+
         # 圓形佈局
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
@@ -202,8 +204,10 @@ class WorkSpace:
             y = center_y + radius * math.sin(angle)
             node_pos[node] = (x, y)
 
+            # [Fix] 獲取動態顏色
+            color = self.mediator.meta.traffic_light.get_color('module', current_data_mode, node)
             # 模組圓圈比較大
-            self.canvas.create_oval(x-30, y-30, x+30, y+30, fill="#4a88c7", outline="white", width=2)
+            self.canvas.create_oval(x-30, y-30, x+30, y+30, fill=color, outline="white", width=2)
             self.canvas.create_text(x, y, text=node, fill="white", font=("Arial", 10, "bold"))
 
         # Draw Edges
@@ -237,6 +241,8 @@ class WorkSpace:
             total_modules = len(modules)
             angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
 
+            current_data_mode = self.mediator.controls.current_mode.get()
+
             for i, mod in enumerate(modules):
                 funcs = data[mod]
                 start_angle = i * angle_per_mod
@@ -251,6 +257,10 @@ class WorkSpace:
                     if self.selected_node == (func, mod):
                         contrast = self._get_contrast_color(color)
                         self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline=contrast, width=3)
+                    # [Fix] 獲取動態顏色 (傳入 function name 和 module name)
+                    color = self.mediator.meta.traffic_light.get_color('function', current_data_mode, func, parent_mod=mod)
+
+                    # ... (繪圖代碼，使用新的 color) ...
                     self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=color, outline="white", width=1)
                     self.canvas.create_text(x, y + 18, text=func, fill="#ccc", font=("Consolas", 8))
                     self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, func, mod, color))

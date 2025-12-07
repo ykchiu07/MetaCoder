@@ -16,6 +16,7 @@ class ImplementationResult:
     model_entropy: float
     duration: float
     success: bool
+    version: int = 0  # [Fix] 補上這個漏掉的欄位
 
 class CodeImplementer:
     def __init__(self, ollama_url: str = "http://localhost:11434"):
@@ -115,7 +116,12 @@ class CodeImplementer:
         # [新增] 依賴注入
         dep_context = self._get_dependency_context(module_dir, spec_data)
 
-        # ... (略過 func_signature)
+        func_signature = (
+            f"Function: {func_name}\n"
+            f"Args: {target_func_spec.get('args')}\n"
+            f"Return: {target_func_spec.get('return_type')}\n"
+            f"Doc: {target_func_spec.get('docstring')}"
+        )
 
         system_prompt = (
             "You are an expert Python Developer. Implement the function based on the spec.\n"

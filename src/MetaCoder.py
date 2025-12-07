@@ -20,6 +20,8 @@ from ChaosExecuter import ChaosExecuter
 from VersionController import VersionController
 from StructureAnalyzer import StructureAnalyzer
 from OllamaManager import OllamaManager
+from TestRunner import TestRunner
+from TrafficLightManager import TrafficLightManager
 
 # Frontend Import
 from MainWindow import MainWindow
@@ -55,6 +57,12 @@ class MetaCoder:
         self.current_architecture_path = None
         # [Fix 3] 初始化 Ollama Manager
         self.ollama_mgr = OllamaManager()
+        # [New] 初始化測試與燈號管理
+        self.test_runner = TestRunner(self.workspace_root)
+        self.static_analyzer = StructureAnalyzer(self.workspace_root)
+
+        # [新增]
+        self.traffic_light = TrafficLightManager(self)
 
     # --- [Fix 3] Ollama 控制 API ---
     def ensure_ollama_started(self):
@@ -499,6 +507,118 @@ class MetaCoder:
         except Exception as e:
             print(f"[Check Error] {e}")
             return True # Fail open to avoid deadlocks
+    # --- Workflow: Unit Test ---
+    def execute_test_workflow(self, target_name, target_type, spec_path, mediator):
+        """生成並執行單元測試"""
+        def task():
+            mediator.log(f"[Test] Starting Test Workflow for {target_name}...")
+
+            # 1. 生成測試 (如果沒有)
+            if target_type == 'function':
+                funcs = [target_name]
+            elif target_type == 'module':
+                # 讀取 spec 找出所有函式
+                try:
+                    with open(spec_path, 'r') as f: spec = json.load(f)
+                    funcs = [f['name'] for f in spec.get('functions', [])]
+                except: funcs = []
+            else:
+                funcs = []
+
+            if funcs and spec_path:
+                mediator.log(f"[Test] Generating tests for: {funcs}")
+                self.tester.generateUnitTest(spec_path, funcs, self.model_config['coder'])
+
+            # 2. 執行測試
+            mod_name = target_name if target_type == 'module' else os.path.basename(os.path.dirname(spec_path))
+            mediator.log(f"[Test] Running tests for module: {mod_name}")
+
+            results = self.test_runner.run_module_tests(mod_name)
+
+            # 3. 輸出結果與更新 Graph
+            pass_count = sum(1 for v in results.values() if v)
+            total = len(results)
+            mediator.log(f"[Test Result] Passed {pass_count}/{total}")
+            for f, passed in results.items():
+                icon = "✅" if passed else "❌"
+                mediator.log(f"  {icon} {f}")
+
+            # 觸發 Graph 重繪 (變色)
+            mediator.root.after(0, mediator.workspace.draw_dependency_graph)
+
+        mediator.run_async(task)
+
+    # --- Workflow: Runtime Analysis ---
+    def execute_runtime_workflow(self, func_name, code_str, mediator):
+        """執行代碼並分析效能"""
+        def task():
+            mediator.log(f"[Runtime] Executing {func_name} with Profiler...")
+
+            # 1. 執行與收集數據
+            # 這裡需要注意：execute_code 需要能跑起來的代碼。
+            # 如果代碼依賴其他模組，直接 exec 可能會失敗。
+            # 簡單解法：我們先跑，失敗就報錯。
+            try:
+                self.collector.execute_code(code_str)
+            except Exception as e:
+                mediator.log(f"[Runtime Error] Execution failed: {e}")
+                return
+
+            # 2. 獲取數據
+            raw_json = self.collector.outputMetricResult(target_funcs=[func_name])
+            data = json.loads(raw_json)
+
+            perf = data['performance'].get(func_name, {})
+            mediator.log(f"[Runtime Data] Time: {perf.get('total_time_ms')}ms, Mem: {perf.get('mem_peak')} bytes")
+
+            # 3. LLM 分析 (可選，這裡只做數據更新讓燈號變色)
+            # 如果你要看 LLM 報告，可以呼叫 analyst.analyzeBottleNeck
+
+            mediator.log("[Runtime] Profile updated. Refreshing graph...")
+            mediator.root.after(0, mediator.workspace.draw_dependency_graph)
+
+        mediator.run_async(task)
+
+    # --- Workflow: Chaos Engineering ---
+    def execute_chaos_workflow(self, module_name, mediator):
+        """生成弱點分析 -> 攻擊計畫 -> 執行攻擊"""
+        def task():
+            mediator.log(f"[Chaos] Initiating Campaign against {module_name}...")
+
+            # 1. 弱點掃描
+            weakness_path, _ = self.chaos_spawner.generateWeaknessAnalysis(
+                module_name, self.workspace_root, self.model_config['analyst']
+            )
+            mediator.log("[Chaos] Weakness analysis complete.")
+
+            if mediator._current_cancel_flag.is_set(): return
+
+            # 2. 生成計畫
+            plan_path, _ = self.chaos_spawner.generateChaosPlan(
+                weakness_path, 2, self.model_config['analyst'] # Focus Level 2
+            )
+            mediator.log("[Chaos] Attack plan generated.")
+
+            if mediator._current_cancel_flag.is_set(): return
+
+            # 3. 執行攻擊
+            mediator.log("[Chaos] Launching attacks (this may take time)...")
+            report_path = self.chaos_runner.produceChaos(module_name)
+
+            # 4. 讀取報告摘要
+            try:
+                with open(report_path, 'r') as f: report = json.load(f)
+                mediator.log("\n=== CHAOS REPORT ===")
+                for res in report.get('results', []):
+                    status = res['status'] # RESILIENT / FRAGILE
+                    mediator.log(f"Target: {res['function']} | {res['injection']} -> {status} ({res['survival_rate']*100}%)")
+            except: pass
+
+            mediator.log("[Chaos] Campaign finished.")
+            mediator.root.after(0, mediator.workspace.draw_dependency_graph)
+
+        mediator.run_async(task)
+
 
 if __name__ == "__main__":
     app = MetaCoder()

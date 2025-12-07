@@ -102,6 +102,11 @@ class MainWindow:
         settings_menu.add_command(label="Model Selection...", command=self.on_model_settings)
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
+        # 在 menubar 中新增一個 Version 選單
+        ver_menu = tk.Menu(menubar, tearoff=0, bg="#3c3f41", fg="#a9b7c6")
+        ver_menu.add_command(label="Show History / Rollback...", command=self.open_history)
+        menubar.add_cascade(label="Version Control", menu=ver_menu)
+
         self.root.config(menu=menubar)
 
     # --- Task Queue System ---
@@ -226,6 +231,10 @@ class MainWindow:
             self.log("Model settings updated.")
 
         tk.Button(win, text="Save", command=save, bg="#4a88c7", fg="white").grid(row=row, column=0, columnspan=2, pady=20)
+
+    def open_history(self):
+        from HistoryWindow import HistoryWindow
+        HistoryWindow(self.root, self)
 
     # --- Helpers ---
     def log(self, msg): self.intelligence.log(msg)
