@@ -188,82 +188,158 @@ class WorkSpace:
         # 取得當前控制面板的功能模式 (creation, static_eval...)
         current_data_mode = self.mediator.controls.current_mode.get()
 
-        # 圓形佈局
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         center_x, center_y = width / 2, height / 2
         radius = min(width, height) / 3
-
         angle_step = 2 * math.pi / len(nodes)
         node_pos = {}
 
-        # Draw Nodes
+        # 1. 計算座標
         for i, node in enumerate(nodes):
             angle = i * angle_step
             x = center_x + radius * math.cos(angle)
             y = center_y + radius * math.sin(angle)
             node_pos[node] = (x, y)
 
-            # [Fix] 獲取動態顏色
-            color = self.mediator.meta.traffic_light.get_color('module', current_data_mode, node)
-            # 模組圓圈比較大
-            self.canvas.create_oval(x-30, y-30, x+30, y+30, fill=color, outline="white", width=2)
-            self.canvas.create_text(x, y, text=node, fill="white", font=("Arial", 10, "bold"))
-
-        # Draw Edges
+        # 2. [Fix 4] 畫線 (使用新的箭頭修正)
+        node_r = 30 # 模組圓圈半徑
         for u, v in edges:
             if u in node_pos and v in node_pos:
                 x1, y1 = node_pos[u]
                 x2, y2 = node_pos[v]
-                self.canvas.create_line(x1, y1, x2, y2, arrow=tk.LAST, fill="#888", width=2)
+
+                # 使用箭頭修正
+                sx, sy, ex, ey = self._get_arrow_coords(x1, y1, x2, y2, radius=node_r + 5)
+
+                self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#888", width=2)
+
+        # 3. 畫節點
+        for node, (x, y) in node_pos.items():
+            # 顏色邏輯
+            if current_data_mode == 'creation':
+                color = "#4a88c7"
+            else:
+                color = self.mediator.meta.traffic_light.get_color('module', current_data_mode, node)
+
+            self.canvas.create_oval(x-node_r, y-node_r, x+node_r, y+node_r, fill=color, outline="white", width=2)
+            self.canvas.create_text(x, y, text=node, fill="white", font=("Arial", 10, "bold"))
 
     def draw_dependency_graph(self):
         if self.view_mode.get() == "module":
             self.draw_module_view()
-        else:
-            self.canvas.delete("all")
-            self._hit_areas = []
-            data = self.mediator.meta.get_function_distribution()
-            if not data:
-                self.canvas.create_text(400, 300, text="No data.", fill="#666", font=("Arial", 14))
-                return
+            return
 
-            modules = list(data.keys())
-            colors = self._generate_colors(len(modules))
-            mod_color_map = {mod: col for mod, col in zip(modules, colors)}
+        # === Function View ===
+        self.canvas.delete("all")
+        self._hit_areas = []
 
-            width = self.canvas.winfo_width()
-            height = self.canvas.winfo_height()
-            if width < 100: width = 800
-            if height < 100: height = 600
-            center_x, center_y = width / 2, height / 2
-            max_radius = min(width, height) / 2 - 50
-            total_modules = len(modules)
-            angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
+        # 1. 準備數據
+        data = self.mediator.meta.get_function_distribution()
+        if not data:
+            self.canvas.create_text(400, 300, text="No function data found.", fill="#666", font=("Arial", 14))
+            return
 
-            current_data_mode = self.mediator.controls.current_mode.get()
+        modules = list(data.keys())
+        # 為 Creation 模式準備顏色 (Legacy Behavior)
+        mod_colors = self._generate_colors(len(modules))
+        mod_color_map = {mod: col for mod, col in zip(modules, mod_colors)}
 
-            for i, mod in enumerate(modules):
-                funcs = data[mod]
-                start_angle = i * angle_per_mod
-                color = mod_color_map[mod]
-                for j, func in enumerate(funcs):
-                    random.seed(hash(mod + func))
-                    theta = start_angle + (angle_per_mod * random.random())
-                    r = max_radius * (0.3 + 0.6 * random.random())
-                    x = center_x + r * math.cos(theta)
-                    y = center_y + r * math.sin(theta)
-                    node_r = 10
-                    if self.selected_node == (func, mod):
-                        contrast = self._get_contrast_color(color)
-                        self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline=contrast, width=3)
-                    # [Fix] 獲取動態顏色 (傳入 function name 和 module name)
+        current_data_mode = self.mediator.controls.current_mode.get()
+        is_creation_mode = (current_data_mode == "creation")
+
+        # 2. 佈局計算 (同心圓或分散式佈局)
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        if width < 100: width = 800
+        if height < 100: height = 600
+
+        center_x, center_y = width / 2, height / 2
+        max_radius = min(width, height) / 2 - 80 # 留邊距
+        total_modules = len(modules)
+        angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
+
+        # 儲存節點位置以便畫線: { 'module_name.func_name': (x, y) }
+        node_pos_map = {}
+        # 儲存節點資訊以便繪圖
+        node_render_list = []
+
+        for i, mod in enumerate(modules):
+            funcs = data[mod]
+            start_angle = i * angle_per_mod
+
+            # 使用該模組的固定顏色 (Creation Mode)
+            base_color = mod_color_map[mod]
+
+            for j, func in enumerate(funcs):
+                # 簡單的散列算法讓節點分佈在扇形區域
+                random.seed(hash(mod + func))
+                theta = start_angle + (angle_per_mod * 0.2) + (angle_per_mod * 0.6 * random.random())
+                r = max_radius * (0.3 + 0.6 * random.random())
+
+                x = center_x + r * math.cos(theta)
+                y = center_y + r * math.sin(theta)
+
+                # 記錄位置 (Key: "auth.login")
+                full_name = f"{mod}.{func}"
+                node_pos_map[full_name] = (x, y)
+
+                # [Fix 2] 決定顏色
+                if is_creation_mode:
+                    # Create 模式：依模組分色
+                    color = base_color
+                else:
+                    # 其他模式：依紅綠燈邏輯
                     color = self.mediator.meta.traffic_light.get_color('function', current_data_mode, func, parent_mod=mod)
 
-                    # ... (繪圖代碼，使用新的 color) ...
-                    self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=color, outline="white", width=1)
-                    self.canvas.create_text(x, y + 18, text=func, fill="#ccc", font=("Consolas", 8))
-                    self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, func, mod, color))
+                node_render_list.append({
+                    'x': x, 'y': y, 'func': func, 'mod': mod, 'color': color, 'full_name': full_name
+                })
+
+        # 3. [Fix 1] 繪製依賴連線 (Edges)
+        # 我們需要讀取 spec.json 中的 'required_calls'
+        # 為了避免 I/O 太慢，我們只讀取一次
+        project_root = self.mediator.meta.workspace_root
+
+        for mod in modules:
+            spec_path = self._get_spec_path(mod)
+            if spec_path and os.path.exists(spec_path):
+                try:
+                    with open(spec_path, 'r') as f: spec = json.load(f)
+                    for f_spec in spec.get('functions', []):
+                        caller_name = f"{mod}.{f_spec['name']}"
+
+                        # 檢查 required_calls
+                        req_calls = f_spec.get('required_calls', [])
+                        for callee_raw in req_calls:
+                            # callee_raw 可能是 "db.connect"
+                            if caller_name in node_pos_map and callee_raw in node_pos_map:
+                                x1, y1 = node_pos_map[caller_name]
+                                x2, y2 = node_pos_map[callee_raw]
+
+                                # [Fix 4] 使用箭頭座標修正
+                                sx, sy, ex, ey = self._get_arrow_coords(x1, y1, x2, y2, radius=12)
+
+                                self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#666", width=1, dash=(2, 4))
+                except: pass
+
+        # 4. 繪製節點 (Nodes) - 畫在線上面
+        node_r = 12 # 半徑
+        for n in node_render_list:
+            x, y = n['x'], n['y']
+
+            # 選中效果
+            if self.selected_node == (n['func'], n['mod']):
+                self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline="white", width=2)
+
+            self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=n['color'], outline="#333", width=1)
+            self.canvas.create_text(x, y + 18, text=n['func'], fill="#ccc", font=("Consolas", 8))
+
+            # 註冊點擊區域
+            self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, n['func'], n['mod'], n['color']))
+
+        # 5. [Fix 3] Legend 只在 Creation 模式顯示
+        if is_creation_mode:
             self._draw_legend(width, height, modules, mod_color_map)
 
     def _draw_legend(self, w, h, modules, color_map):
@@ -300,17 +376,24 @@ class WorkSpace:
 
     def on_canvas_click(self, event):
         clicked_something = False
+        current_mode = self.mediator.controls.current_mode.get() # 獲取當前模式
+
         for x1, y1, x2, y2, func, mod, color in self._hit_areas:
             if x1 <= event.x <= x2 and y1 <= event.y <= y2:
                 self.selected_node = (func, mod)
-                self.draw_dependency_graph()
+                self.draw_dependency_graph() # 重繪以顯示選中框
 
-                # [Fix 4] 通知 ControlPanel 更新按鈕
                 spec_path = self._get_spec_path(mod)
-                if spec_path:
+
+                # [Fix 2] 恢復 Create 模式下的互動邏輯
+                if current_mode == 'creation' and spec_path:
+                    # 1. 更新下方 Control Panel 的按鈕
                     self.mediator.controls.update_context_button('impl', (func, spec_path))
 
-                self.graph_menu.post(event.x_root, event.y_root)
+                    # 2. 彈出右鍵選單 (Optionally, if user specifically asks for context menu)
+                    # 這裡我們讓左鍵點擊也能觸發選單，方便操作
+                    self.graph_menu.post(event.x_root, event.y_root)
+
                 clicked_something = True
                 break
 
@@ -319,8 +402,9 @@ class WorkSpace:
                 self.selected_node = None
                 self.draw_dependency_graph()
 
-                # [Fix 4] 恢復預設按鈕
-                self.mediator.controls.update_context_button('arch', None)
+                # 清除 Control Panel 狀態
+                if current_mode == 'creation':
+                    self.mediator.controls.update_context_button('arch', None)
 
             try: self.graph_menu.unpost()
             except: pass
@@ -345,3 +429,29 @@ class WorkSpace:
 
         if spec_path:
             self.mediator.run_async(lambda: self.mediator.meta.implement_functions(spec_path, [func], cancel_event=self.mediator._current_cancel_flag))
+
+    def _get_arrow_coords(self, x1, y1, x2, y2, radius=15):
+        """
+        [Fix 4] 計算箭頭的起點與終點，使其停留在圓周上，而非圓心。
+        radius: 節點圓形的半徑 (需與繪圖時的 node_r 匹配，稍微大一點留白)
+        """
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.sqrt(dx*dx + dy*dy)
+
+        if dist == 0 or dist <= radius * 2:
+            return x1, y1, x2, y2 # 重疊或太近，不調整
+
+        # 單位向量
+        ux = dx / dist
+        uy = dy / dist
+
+        # 起點往外推
+        sx = x1 + ux * radius
+        sy = y1 + uy * radius
+
+        # 終點往回縮
+        ex = x2 - ux * radius
+        ey = y2 - uy * radius
+
+        return sx, sy, ex, ey
