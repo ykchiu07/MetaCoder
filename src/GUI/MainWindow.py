@@ -136,10 +136,20 @@ class MainWindow:
         from tkinter import filedialog
         dir_path = filedialog.askdirectory()
         if dir_path:
-            self.log(f"Switched workspace to: {dir_path}")
-            # 這裡應該重新初始化 MetaCoder，為了簡化我們先只做 Log
-            # self.meta = MetaCoder(dir_path)
-            # self.nav.refresh_tree()
+            self.log(f"Switching workspace to: {dir_path}...")
+
+            # 1. 呼叫後端重置
+            self.meta.set_workspace(dir_path)
+
+            # 2. 通知 ProjectExplorer 重置 (這會觸發它的監控迴圈重啟)
+            self.nav.set_workspace(dir_path)
+
+            # 3. 清空編輯器與畫布
+            self.workspace.code_editor.delete("1.0", tk.END)
+            self.workspace.canvas.delete("all")
+
+            self.root.title(f"Vibe-Coder IDE - {os.path.basename(dir_path)}")
+            self.log("Workspace loaded.")
 
     def on_model_settings(self):
         """彈出模型設定視窗"""

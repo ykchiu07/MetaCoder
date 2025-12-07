@@ -38,7 +38,7 @@ class CodeImplementer:
         model_name: str= "gemma3:12b",
         feedback_report: str = None  # [新增] 接收來自 RuntimeAnalyst 的報告
     ) -> ImplementationResult:
-
+        print(spec_data)
         start_time = time.time()
 
         # 1. 推導路徑

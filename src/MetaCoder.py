@@ -195,6 +195,77 @@ class MetaCoder:
         with open(self.current_architecture_path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
+    def get_module_dependencies(self):
+        """
+        獲取模組依賴關係圖數據供 GUI 繪製。
+        Returns:
+            nodes: List[str] 模組名稱列表
+            edges: List[Tuple[str, str]] 依賴關係 (source, target)
+        """
+        # 確保有最新的分析
+        if not self.static_analyzer.dependencies:
+             # 如果尚未初始化或數據為空，嘗試重新掃描一次 (假設已有代碼)
+             self.static_analyzer._preprocess()
+
+        # 取得所有內部模組名稱 (Nodes)
+        nodes = list(self.static_analyzer.internal_modules)
+
+        # 取得依賴關係 (Edges)
+        edges = []
+        for src, targets in self.static_analyzer.dependencies.items():
+            for tgt in targets:
+                if tgt in nodes: # 只顯示內部模組間的依賴
+                    edges.append((src, tgt))
+
+        return nodes, edges
+
+    def get_function_distribution(self):
+        """
+        [新增] 獲取 '模組 -> 函式列表' 的映射，用於 GUI 繪圖。
+        Returns:
+            dict: { 'module_name': ['func1', 'func2', ...], ... }
+        """
+        # 確保數據是最新的
+        if not self.static_analyzer.graphs:
+            self.static_analyzer._preprocess()
+
+        distribution = {}
+
+        # 遍歷 StructureAnalyzer 解析出的所有 ASTGraph
+        for mod_name, graph in self.static_analyzer.graphs.items():
+            funcs = []
+            for _, data in graph.graph.nodes(data=True):
+                if data.get('type') == 'function':
+                    funcs.append(data.get('name'))
+
+            if funcs:
+                distribution[mod_name] = funcs
+
+        return distribution
+
+    def set_workspace(self, new_path: str):
+        """
+        [關鍵修正] 切換工作區並重置所有後端狀態。
+        防止舊專案的資料殘留。
+        """
+        print(f"[Meta] Switching workspace to: {new_path}")
+        self.workspace_root = os.path.abspath(new_path)
+
+        # 1. 強制重新初始化所有依賴路徑的子系統
+        self.vc = VersionController(self.workspace_root)
+        self.pm = ProjectManager(self.workspace_root)
+        self.static_analyzer = StructureAnalyzer(self.workspace_root) # 清空舊的依賴圖
+        self.chaos_runner = ChaosExecuter(self.workspace_root)
+
+        # 2. 清空快取狀態
+        self.current_architecture_path = None
+
+        # 3. 嘗試自動載入新專案的架構檔 (如果存在)
+        # 這裡會更新 current_architecture_path，讓 ProjectExplorer 的監控迴圈能抓到
+        self.get_project_tree()
+
+        print("[Meta] Workspace reset complete.")
+
 if __name__ == "__main__":
     app = MetaCoder()
     app.run()
