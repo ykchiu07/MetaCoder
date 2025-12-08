@@ -18,56 +18,57 @@ class StructureAnalyzer:
         self._preprocess()
 
     def _get_internal_modules(self, work_dir):
-        """掃描目錄建立內部模組白名單"""
+        """掃描目錄建立內部模組白名單 (排除 tests)"""
         mods = set()
         for root, _, files in os.walk(work_dir):
+            # [Fix 1] 排除測試目錄
+            if "tests" in root.split(os.sep):
+                continue
+
             for file in files:
-                if file.endswith(".py") and file != "__init__.py":
-                    # 將路徑轉換為 Python 模組表示法 (e.g., utils.helper)
+                # [Fix 1] 排除測試檔案
+                if file.endswith(".py") and file != "__init__.py" and not file.startswith("test_"):
                     rel_path = os.path.relpath(os.path.join(root, file), work_dir)
                     mod_name = rel_path.replace(os.sep, ".")[:-3]
                     mods.add(mod_name)
-                    # 同時加入頂層包名
                     if "." in mod_name:
                         mods.add(mod_name.split('.')[0])
         return mods
 
     def _preprocess(self):
-        """
-        一次性解析所有檔案：
-        1. 建立 ASTGraph 快取
-        2. 建立全域模組依賴圖 (Global Dependency Graph)
-        """
+        """一次性解析所有檔案 (排除 tests)"""
         for root, _, files in os.walk(self.work_dir):
+            # [Fix 1] 排除測試目錄
+            if "tests" in root.split(os.sep):
+                continue
+
             for file in files:
-                if file.endswith(".py"):
+                if file.endswith(".py") and not file.startswith("test_"):
                     path = os.path.join(root, file)
-                    # 取得模組名稱
                     rel_path = os.path.relpath(path, self.work_dir)
                     mod_name = rel_path.replace(os.sep, ".")[:-3]
-                    if file == "__init__.py": # 處理 package
+                    if file == "__init__.py":
                         mod_name = rel_path.replace(os.sep, ".")[:-12]
 
-                    # 解析程式碼
-                    with open(path, 'r', encoding='utf-8') as f:
-                        code = f.read()
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            code = f.read()
 
-                    graph = ASTGraph.ASTGraph()
-                    analyzer = PythonSourceParser.PythonSourceParser(graph)
-                    analyzer.analyze_code(code)
+                        graph = ASTGraph.ASTGraph()
+                        analyzer = PythonSourceParser.PythonSourceParser(graph)
+                        analyzer.analyze_code(code)
+                        self.graphs[mod_name] = graph
 
-                    self.graphs[mod_name] = graph
-
-                    # 提取依賴關係 (僅針對內部模組)
-                    for _, data in graph.graph.nodes(data=True):
-                        if data.get('type') == 'import':
-                            # 這裡簡化處理 import 字串解析
-                            imp_str = data.get('label', '')
-                            # 簡單啟發式解析：分割字串並比對白名單
-                            for token in imp_str.replace(',', ' ').split():
-                                clean_token = token.split('.')[0]
-                                if clean_token in self.internal_modules and clean_token != mod_name:
-                                    self.dependencies[mod_name].add(clean_token)
+                        # ... (依賴提取邏輯保持不變) ...
+                        for _, data in graph.graph.nodes(data=True):
+                            if data.get('type') == 'import':
+                                imp_str = data.get('label', '')
+                                for token in imp_str.replace(',', ' ').split():
+                                    clean_token = token.split('.')[0]
+                                    if clean_token in self.internal_modules and clean_token != mod_name:
+                                        self.dependencies[mod_name].add(clean_token)
+                    except Exception as e:
+                        print(f"[Analyzer] Error processing {file}: {e}")
 
     # --- 1. 耦合度 (Coupling) [跨模組] ---
     def calculateCoupling(self, module_name: str) -> float:

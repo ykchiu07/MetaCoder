@@ -262,6 +262,8 @@ class WorkSpace:
             return
 
         modules = list(data.keys())
+        # [Fix 1] 確保過濾掉測試檔案 (雖然 Analyzer 過濾了，但保險起見)
+        modules = [m for m in modules if "test" not in m]
         mod_colors = self._generate_colors(len(modules))
         mod_color_map = {mod: col for mod, col in zip(modules, mod_colors)}
 
@@ -288,6 +290,8 @@ class WorkSpace:
             base_color = mod_color_map.get(mod, "#888")
 
             for j, func in enumerate(funcs):
+                # 排除單元測試函式
+                if func.startswith("test_"): continue
                 # 為了穩定顯示，用 hash 固定位置
                 random.seed(hash(mod + func))
                 theta = start_angle + (angle_per_mod * 0.2) + (angle_per_mod * 0.6 * random.random())
@@ -297,8 +301,8 @@ class WorkSpace:
 
                 full_name = f"{mod}.{func}"
                 node_pos_map[full_name] = (x, y)
-                # 容錯 key
-                node_pos_map[func] = (x, y)
+                # [關鍵] 建立 func name 到位置的映射，方便模糊查找
+                if func not in node_pos_map: node_pos_map[func] = (x, y)
 
                 if is_creation_mode:
                     color = base_color
@@ -347,6 +351,36 @@ class WorkSpace:
                 sx, sy, ex, ey = self._get_arrow_coords(start[0], start[1], end[0], end[1], radius=12)
                 self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#888", width=1, dash=(2, 4))
 
+        # 2. [Fix 2] 繪製依賴連線 (強制模糊比對)
+        for mod in modules:
+            spec_path = self._get_spec_path(mod)
+            if spec_path and os.path.exists(spec_path):
+                try:
+                    with open(spec_path, 'r') as f: spec = json.load(f)
+                    for f_spec in spec.get('functions', []):
+                        caller = f_spec['name']
+                        caller_full = f"{mod}.{caller}"
+
+                        # 取得依賴列表
+                        targets = f_spec.get('required_calls', [])
+
+                        start_pos = node_pos_map.get(caller_full) or node_pos_map.get(caller)
+
+                        if start_pos:
+                            for tgt_raw in targets:
+                                # tgt_raw 可能是 "db.connect", "connect", "utils.helper"
+                                # 嘗試各種 key
+                                end_pos = node_pos_map.get(tgt_raw)
+                                if not end_pos and "." in tgt_raw:
+                                    # 如果是 db.connect，試試看 connect
+                                    short_name = tgt_raw.split('.')[-1]
+                                    end_pos = node_pos_map.get(short_name)
+
+                                if end_pos:
+                                    sx, sy, ex, ey = self._get_arrow_coords(start_pos[0], start_pos[1], end_pos[0], end_pos[1], radius=12)
+                                    self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#aaa", width=1, dash=(2, 4))
+                except: pass
+
         # 3. 繪製節點 (使用 tag 識別)
         node_r = 12
         for n in nodes_to_draw:
@@ -393,33 +427,30 @@ class WorkSpace:
 
     # [Fix 2] 使用 Canvas 內建的 find_overlapping 確保點擊命中
     def on_canvas_click(self, event):
-        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
-        # 搜尋點擊點附近 5px 的物件
-        items = self.canvas.find_overlapping(x-5, y-5, x+5, y+5)
-
+        clicked_something = False
         current_mode = self.mediator.controls.current_mode.get()
-        clicked_node = None
 
-        for item_id in items:
-            tags = self.canvas.gettags(item_id)
-            if "node" in tags: # 確保點到的是節點圓圈
-                # 反查資料
-                for area in self._hit_areas:
-                    # area: (tag_id, func, mod, spec_path)
-                    if area[0] in tags:
-                        clicked_node = area
-                        break
-            if clicked_node: break
+        for x1, y1, x2, y2, func, mod, color in self._hit_areas:
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                self.selected_node = (func, mod)
+                self.draw_dependency_graph()
 
-        if clicked_node:
-            tag_id, func, mod, spec_path = clicked_node
-            self.selected_node = (func, mod)
-            self.draw_dependency_graph() # 重繪選中框
+                spec_path = self._get_spec_path(mod)
 
-            if current_mode == 'creation' and spec_path:
-                self.mediator.controls.update_context_button('impl', (func, spec_path))
-                self.graph_menu.post(event.x_root, event.y_root)
-        else:
+                # [Fix 3] 強制觸發 Creation 模式下的按鈕更新
+                # 即使 spec_path 沒找到，也顯示警告，方便除錯
+                if current_mode == 'creation':
+                    if spec_path:
+                        self.mediator.controls.update_context_button('impl', (func, spec_path))
+                        # 顯示右鍵選單
+                        self.graph_menu.post(event.x_root, event.y_root)
+                    else:
+                        print(f"[Warning] Spec not found for module: {mod}")
+
+                clicked_something = True
+                break
+
+        if not clicked_something:
             if self.selected_node:
                 self.selected_node = None
                 self.draw_dependency_graph()

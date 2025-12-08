@@ -34,34 +34,40 @@ class CodeImplementer:
         return text
 
     def _get_dependency_context(self, module_dir: str, spec_data: Dict) -> str:
-        """
-        [新增] 讀取專案架構與依賴模組的 Spec，組合出 Context。
-        """
         try:
-            # 假設結構: workspace/project/module/
             project_dir = os.path.dirname(module_dir)
             arch_path = os.path.join(project_dir, "architecture.json")
-
             if not os.path.exists(arch_path): return ""
 
             with open(arch_path, 'r') as f: arch = json.load(f)
 
+            # 判斷是否為 Main 模組
             current_mod_name = os.path.basename(module_dir)
-            target_mod_info = next((m for m in arch.get('modules', []) if m['name'] == current_mod_name), None)
+            is_main = (current_mod_name == "main" or spec_data.get('module_name') == "main")
 
-            if not target_mod_info: return ""
+            dependencies = []
+            if is_main:
+                # [Fix 4] 如果是 Main，它依賴所有模組
+                dependencies = [m['name'] for m in arch.get('modules', [])]
+            else:
+                target_mod_info = next((m for m in arch.get('modules', []) if m['name'] == current_mod_name), None)
+                if target_mod_info:
+                    dependencies = target_mod_info.get('dependencies', [])
 
-            dependencies = target_mod_info.get('dependencies', [])
-            context = "EXTERNAL DEPENDENCIES:\n"
+            context = "EXTERNAL DEPENDENCIES (APIs you can use):\n"
 
             for dep_name in dependencies:
+                # 忽略自己
+                if dep_name == current_mod_name: continue
+
                 dep_spec_path = os.path.join(project_dir, dep_name, "spec.json")
                 if os.path.exists(dep_spec_path):
                     with open(dep_spec_path, 'r') as f:
                         dep_spec = json.load(f)
-                        # 簡化 spec 資訊以節省 token
-                        funcs = [f"{f['name']}({', '.join([a['name'] for a in f.get('args',[])])})" for f in dep_spec.get('functions', [])]
-                        context += f"- Module '{dep_name}': Available Functions: {', '.join(funcs)}\n"
+                        # 摘要 API
+                        funcs = [f"{f['name']}(...)" for f in dep_spec.get('functions', [])]
+                        desc = dep_spec.get('description', '')
+                        context += f"- Module '{dep_name}': {desc}\n  Exports: {', '.join(funcs)}\n"
 
             return context
         except Exception as e:
