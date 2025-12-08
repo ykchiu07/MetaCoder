@@ -225,28 +225,50 @@ class WorkSpace:
             self.canvas.create_oval(x-node_r, y-node_r, x+node_r, y+node_r, fill=color, outline="white", width=2)
             self.canvas.create_text(x, y, text=node, fill="white", font=("Arial", 10, "bold"))
 
+    # [New API] 讓外部呼叫以自動更新編輯器內容
+    def reload_active_file(self):
+        try:
+            current_tab = self.editor_notebook.select()
+            if not current_tab: return
+            target_widget = self.editor_notebook.nametowidget(current_tab)
+            file_path = self.opened_files_map.get(target_widget)
+
+            if file_path and os.path.exists(file_path):
+                # 記住現在的捲動位置
+                # scroll_pos = ... (ScrolledText 比較難精確還原，這裡先單純重載)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    new_content = f.read()
+
+                # 找到 Text widget
+                for child in target_widget.winfo_children():
+                    if isinstance(child, scrolledtext.ScrolledText):
+                        child.delete("1.0", tk.END)
+                        child.insert(tk.END, new_content)
+                        break
+        except Exception as e:
+            print(f"Auto-reload failed: {e}")
+
     def draw_dependency_graph(self):
         if self.view_mode.get() == "module":
             self.draw_module_view()
             return
 
         self.canvas.delete("all")
-        self._hit_areas = []
+        self._hit_areas = [] # 格式: (tag_id, func, mod, spec_path)
 
         data = self.mediator.meta.get_function_distribution()
         if not data:
-            self.canvas.create_text(400, 300, text="No function data found.", fill="#666", font=("Arial", 14))
+            self.canvas.create_text(400, 300, text="No function data.", fill="#666")
             return
 
         modules = list(data.keys())
-        # Creation 模式顏色
         mod_colors = self._generate_colors(len(modules))
         mod_color_map = {mod: col for mod, col in zip(modules, mod_colors)}
 
         current_data_mode = self.mediator.controls.current_mode.get()
         is_creation_mode = (current_data_mode == "creation")
 
-        # 佈局計算
+        # 佈局
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         if width < 100: width = 800
@@ -254,29 +276,28 @@ class WorkSpace:
 
         center_x, center_y = width / 2, height / 2
         max_radius = min(width, height) / 2 - 80
-        total_modules = len(modules)
-        angle_per_mod = (2 * math.pi) / total_modules if total_modules > 0 else 0
+        angle_per_mod = (2 * math.pi) / len(modules) if modules else 0
 
-        node_pos_map = {}
-        node_render_list = []
+        node_pos_map = {} # { 'mod.func': (x, y) }
+        nodes_to_draw = []
 
-        # --- 第一階段：計算位置與節點 ---
+        # 1. 計算節點位置
         for i, mod in enumerate(modules):
             funcs = data[mod]
             start_angle = i * angle_per_mod
             base_color = mod_color_map.get(mod, "#888")
 
             for j, func in enumerate(funcs):
+                # 為了穩定顯示，用 hash 固定位置
                 random.seed(hash(mod + func))
                 theta = start_angle + (angle_per_mod * 0.2) + (angle_per_mod * 0.6 * random.random())
                 r = max_radius * (0.3 + 0.6 * random.random())
-
                 x = center_x + r * math.cos(theta)
                 y = center_y + r * math.sin(theta)
 
                 full_name = f"{mod}.{func}"
                 node_pos_map[full_name] = (x, y)
-                # 同時允許只用 func 當 key (如果函式名唯一)
+                # 容錯 key
                 node_pos_map[func] = (x, y)
 
                 if is_creation_mode:
@@ -284,57 +305,63 @@ class WorkSpace:
                 else:
                     color = self.mediator.meta.traffic_light.get_color('function', current_data_mode, func, parent_mod=mod)
 
-                node_render_list.append({
-                    'x': x, 'y': y, 'func': func, 'mod': mod, 'color': color, 'full_name': full_name
+                spec_path = self._get_spec_path(mod)
+                nodes_to_draw.append({
+                    'x': x, 'y': y, 'func': func, 'mod': mod,
+                    'color': color, 'spec': spec_path, 'full': full_name
                 })
 
-        # --- 第二階段：[Fix 1] 繪製連線 ---
-        # 策略：讀取 Spec 中的 required_calls (Phase 2產物) 和 靜態分析依賴 (Phase 3產物)
-        for mod in modules:
-            spec_path = self._get_spec_path(mod)
-            if spec_path and os.path.exists(spec_path):
+        # 2. [Fix 1] 繪製依賴線條 (Spec + Static Analysis)
+        # 收集所有邊 (src -> dst)
+        edges = set()
+
+        # A. 從 Spec (Phase 2)
+        for node in nodes_to_draw:
+            if node['spec'] and os.path.exists(node['spec']):
                 try:
-                    with open(spec_path, 'r') as f: spec = json.load(f)
+                    with open(node['spec'], 'r') as f: spec = json.load(f)
                     for f_spec in spec.get('functions', []):
-                        caller_func = f_spec['name']
-                        caller_full = f"{mod}.{caller_func}"
+                        if f_spec['name'] == node['func']:
+                            for target in f_spec.get('required_calls', []):
+                                edges.add((node['full'], target))
+                except: pass
 
-                        # 取得目標列表
-                        targets = f_spec.get('required_calls', [])
+        # B. 從 Static Analysis (Phase 3 - 如果有實作)
+        # 這裡需要 StructureAnalyzer 支援函式級依賴，如果尚未支援，至少我們有了 A 方案。
+        # 假設 A 方案已經夠用 (因為我們修復了 required_calls)
 
-                        for tgt in targets:
-                            # tgt 可能是 "auth.login" 或 "login"
-                            # 嘗試匹配位置
-                            start_pos = node_pos_map.get(caller_full) or node_pos_map.get(caller_func)
-                            end_pos = node_pos_map.get(tgt)
+        for src_name, tgt_name in edges:
+            # 嘗試匹配座標
+            start = node_pos_map.get(src_name)
+            end = node_pos_map.get(tgt_name)
 
-                            # 如果找不到，嘗試拼湊 module name
-                            if not end_pos and "." not in tgt:
-                                # 嘗試遍歷所有模組找這個函式
-                                for candidate_mod in modules:
-                                    candidate_full = f"{candidate_mod}.{tgt}"
-                                    if candidate_full in node_pos_map:
-                                        end_pos = node_pos_map[candidate_full]
-                                        break
+            # 嘗試模糊匹配
+            if not end and "." not in tgt_name:
+                # 可能是跨模組呼叫但沒寫模組名，遍歷所有節點找
+                for k, v in node_pos_map.items():
+                    if k.endswith(f".{tgt_name}"):
+                        end = v
+                        break
 
-                            if start_pos and end_pos:
-                                sx, sy, ex, ey = self._get_arrow_coords(start_pos[0], start_pos[1], end_pos[0], end_pos[1], radius=12)
-                                self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#aaa", width=1, dash=(2, 4))
-                except Exception as e:
-                    pass
+            if start and end:
+                sx, sy, ex, ey = self._get_arrow_coords(start[0], start[1], end[0], end[1], radius=12)
+                self.canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill="#888", width=1, dash=(2, 4))
 
-        # --- 第三階段：繪製節點 ---
+        # 3. 繪製節點 (使用 tag 識別)
         node_r = 12
-        for n in node_render_list:
+        for n in nodes_to_draw:
             x, y = n['x'], n['y']
 
-            if self.selected_node == (n['func'], n['mod']):
-                self.canvas.create_oval(x - node_r - 4, y - node_r - 4, x + node_r + 4, y + node_r + 4, outline="white", width=2)
+            # 畫圓
+            tag_id = f"node_{n['mod']}_{n['func']}"
+            oval = self.canvas.create_oval(x-node_r, y-node_r, x+node_r, y+node_r,
+                                           fill=n['color'], outline="#333", tags=(tag_id, "node"))
 
-            self.canvas.create_oval(x - node_r, y - node_r, x + node_r, y + node_r, fill=n['color'], outline="#333", width=1)
-            self.canvas.create_text(x, y + 18, text=n['func'], fill="#ccc", font=("Consolas", 8))
+            # 畫文字
+            self.canvas.create_text(x, y+18, text=n['func'], fill="#ccc", font=("Consolas", 8))
 
-            self._hit_areas.append((x - node_r, y - node_r, x + node_r, y + node_r, n['func'], n['mod'], n['color']))
+            # 儲存 hit area (這裡改存 tag_id 方便 lookup)
+            self._hit_areas.append((tag_id, n['func'], n['mod'], n['spec']))
 
         if is_creation_mode:
             self._draw_legend(width, height, modules, mod_color_map)
@@ -364,27 +391,35 @@ class WorkSpace:
                 if os.path.exists(p2): return p2
         return None
 
+    # [Fix 2] 使用 Canvas 內建的 find_overlapping 確保點擊命中
     def on_canvas_click(self, event):
-        clicked_something = False
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        # 搜尋點擊點附近 5px 的物件
+        items = self.canvas.find_overlapping(x-5, y-5, x+5, y+5)
+
         current_mode = self.mediator.controls.current_mode.get()
+        clicked_node = None
 
-        for x1, y1, x2, y2, func, mod, color in self._hit_areas:
-            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
-                self.selected_node = (func, mod)
-                self.draw_dependency_graph()
+        for item_id in items:
+            tags = self.canvas.gettags(item_id)
+            if "node" in tags: # 確保點到的是節點圓圈
+                # 反查資料
+                for area in self._hit_areas:
+                    # area: (tag_id, func, mod, spec_path)
+                    if area[0] in tags:
+                        clicked_node = area
+                        break
+            if clicked_node: break
 
-                spec_path = self._get_spec_path(mod)
-                # print(f"[Debug] Clicked {func} in {mod}, Spec: {spec_path}, Mode: {current_mode}") # 除錯用
+        if clicked_node:
+            tag_id, func, mod, spec_path = clicked_node
+            self.selected_node = (func, mod)
+            self.draw_dependency_graph() # 重繪選中框
 
-                # [Fix 2] 確保 Creation 模式下能觸發 Implement
-                if current_mode == 'creation' and spec_path:
-                    self.mediator.controls.update_context_button('impl', (func, spec_path))
-                    self.graph_menu.post(event.x_root, event.y_root)
-
-                clicked_something = True
-                break
-
-        if not clicked_something:
+            if current_mode == 'creation' and spec_path:
+                self.mediator.controls.update_context_button('impl', (func, spec_path))
+                self.graph_menu.post(event.x_root, event.y_root)
+        else:
             if self.selected_node:
                 self.selected_node = None
                 self.draw_dependency_graph()

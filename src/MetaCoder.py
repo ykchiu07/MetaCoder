@@ -266,9 +266,11 @@ class MetaCoder:
                 # 更新狀態為 failed
                 self.coder._update_status_file(os.path.dirname(spec_path), res.function_name, "audit_failed", 0, 0)
 
-        # 3. [Commit]
+        # [Fix 5] 版本控制存檔
         if valid_results:
-            self.vc.archiveVersion(f"Implemented {len(valid_results)} funcs in {os.path.basename(os.path.dirname(spec_path))}")
+            msg = f"Implemented {len(valid_results)} funcs: {', '.join([r.function_name for r in valid_results])}"
+            self.vc.archiveVersion(msg)
+            print(f"[Meta] Version Archived: {msg}")
 
         return valid_results
 
@@ -540,16 +542,14 @@ class MetaCoder:
             mediator.log(f"[Test] Running tests for module: {mod_name}")
             results = self.test_runner.run_module_tests(mod_name)
 
-            # 3. 輸出結果與更新 Graph
+            # Log 結果
             pass_count = sum(1 for v in results.values() if v)
-            total = len(results)
-            mediator.log(f"[Test Result] Passed {pass_count}/{total}")
-            for f, passed in results.items():
-                icon = "✅" if passed else "❌"
-                mediator.log(f"  {icon} {f}")
+            mediator.log(f"[Test Result] Passed {pass_count}/{len(results)}")
 
-            # 觸發 Graph 重繪 (變色)
+            # 更新 Graph
             mediator.root.after(0, mediator.workspace.draw_dependency_graph)
+            # 自動重載編輯器 (如果測試修改了檔案?? 通常不會，但保持一致性)
+            mediator.root.after(0, mediator.workspace.reload_active_file)
 
         mediator.run_async(task)
 

@@ -339,18 +339,15 @@ class ProjectExplorer:
 
                         mod_dir = os.path.dirname(s_path)
                         code_path = os.path.join(mod_dir, "__init_logic__.py" if f_name == "__init__" else f"{f_name}.py")
+
+                        # [Fix 4] 如果檔案存在，嘗試開啟或重載
                         if os.path.exists(code_path):
                             with open(code_path, 'r', encoding='utf-8') as f:
                                 code = f.read()
+                            # 這裡 open_file 如果已經開啟會切換 tab，我們需要確保內容更新
+                            # 所以先呼叫 reload，再 open (switch)
+                            self.mediator.workspace.reload_active_file()
                             self.mediator.workspace.open_file(f_name, code, code_path)
-
-                        status_path = os.path.join(mod_dir, ".status.json")
-                        try:
-                            with open(status_path, 'r') as f: st = json.load(f)
-                            info = st.get(f_name, {})
-                            self.mediator.log(f"[Success] {f_name} v{info.get('version')} (Entropy: {info.get('entropy')})")
-                        except: pass
-
                     return task_func, success_cb
 
                 t_func, s_cb = make_task(spec_path, func, mod_name)
